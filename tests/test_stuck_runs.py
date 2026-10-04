@@ -48,3 +48,52 @@ def test_sweep_stuck_runs_fails_with_stuck_message() -> None:
     assert failed == 1
     assert repo.fail_calls[0][0] == "execution-1"
     assert repo.fail_calls[0][1].startswith("Stuck:")
+
+
+def test_sweep_cancels_only_executions_it_transitions_to_failed() -> None:
+    events: list[tuple[str, str]] = []
+
+    class FakeExecutionRepository:
+        async def list_running_older_than(self, cutoff: datetime) -> list[object]:
+            return [
+                SimpleNamespace(id="already-terminal"),
+                SimpleNamespace(id="still-running"),
+            ]
+
+        async def fail_if_running(
+            self,
+            execution_id: str,
+            error_message: str,
+        ) -> bool:
+            events.append(("fail", execution_id))
+            return execution_id == "still-running"
+
+    class FakeActivity:
+        def request_execution_cancel(self, execution_id: str) -> None:
+            events.append(("activity-cancel", execution_id))
+
+    class FakeTaskRegistry:
+        def cancel_for_execution(self, execution_id: str) -> None:
+            events.append(("task-cancel", execution_id))
+
+    async def on_failed(execution_id: str) -> None:
+        events.append(("on-failed", execution_id))
+
+    failed = asyncio.run(
+        sweep_stuck_runs(
+            executions=FakeExecutionRepository(),  # type: ignore[arg-type]
+            threshold_seconds=1800,
+            activity=FakeActivity(),
+            task_registry=FakeTaskRegistry(),
+            on_failed=on_failed,
+        )
+    )
+
+    assert failed == 1
+    assert events == [
+        ("fail", "already-terminal"),
+        ("fail", "still-running"),
+        ("activity-cancel", "still-running"),
+        ("task-cancel", "still-running"),
+        ("on-failed", "still-running"),
+    ]

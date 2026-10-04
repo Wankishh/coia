@@ -1,13 +1,13 @@
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.models.conversation import ChatMessage, ChatRole, Conversation
 from app.models.execution import ExecutionLog, ExecutionStatus, TriggerType
 from app.services.agent_runner import _prepend_run_memory
-from app.services.chat_service import prepare_chat_memory
+from app.services.chat_service import _memory_message, prepare_chat_memory
 from app.services.memory import (
     extractive_summary,
     format_run_memory_block,
@@ -65,7 +65,64 @@ def test_prepare_chat_memory_passes_only_windowed_tail_to_langchain():
     ]
     assert all(isinstance(message, (HumanMessage, AIMessage)) for message in tail)
     assert summary_update is not None
-    assert "scheduled run output" not in summary_update
+    assert summary_update.through_count == 22
+    assert "scheduled run output" not in summary_update.summary
+
+
+def test_prepare_chat_memory_summarizes_only_new_overflow_and_keeps_newest():
+    messages = [
+        _msg(
+            ChatRole.user if index % 2 == 0 else ChatRole.assistant,
+            f"message-{index}-" + ("x" * 40),
+        )
+        for index in range(8)
+    ]
+    conversation = Conversation(
+        agent_id="a1",
+        messages=messages,
+        rolling_summary="old summary that should be displaced",
+        summary_through_count=4,
+    )
+
+    _, summary_update = prepare_chat_memory(
+        conversation,
+        SimpleNamespace(),
+        window=2,
+        summary_max_chars=100,
+    )
+
+    assert summary_update is not None
+    assert summary_update.through_count == 6
+    assert "message-5" in summary_update.summary
+    assert "message-4" not in summary_update.summary
+    assert "old summary" not in summary_update.summary
+
+
+def test_prepare_chat_memory_returns_no_update_without_new_overflow():
+    conversation = Conversation(
+        agent_id="a1",
+        messages=[_msg(ChatRole.user, f"message-{index}") for index in range(6)],
+        rolling_summary="already summarized",
+        summary_through_count=4,
+    )
+
+    _, summary_update = prepare_chat_memory(
+        conversation,
+        SimpleNamespace(),
+        window=2,
+        summary_max_chars=2000,
+    )
+
+    assert summary_update is None
+
+
+def test_historical_memory_is_an_untrusted_human_message():
+    memory = _memory_message("Earlier user text")
+
+    assert isinstance(memory, HumanMessage)
+    assert memory.content.startswith(
+        "[Untrusted memory of earlier turns — may be incomplete]\n"
+    )
 
 
 def test_format_run_memory_block_includes_last_outputs():
@@ -130,8 +187,7 @@ class _FakeExecutionCollection:
         return self.cursor
 
 
-@pytest.mark.asyncio
-async def test_list_recent_finished_excludes_current_and_returns_oldest_first():
+def test_list_recent_finished_excludes_current_and_returns_oldest_first():
     newest = ExecutionLog(
         id="newest",
         agent_id="a1",
@@ -153,10 +209,12 @@ async def test_list_recent_finished_excludes_current_and_returns_oldest_first():
     repository = ExecutionRepository.__new__(ExecutionRepository)
     repository._col = collection
 
-    rows = await repository.list_recent_finished(
-        "a1",
-        limit=2,
-        exclude_id="current",
+    rows = asyncio.run(
+        repository.list_recent_finished(
+            "a1",
+            limit=2,
+            exclude_id="current",
+        )
     )
 
     assert [row.id for row in rows] == ["oldest", "newest"]

@@ -50,12 +50,12 @@ async def sweep_stuck_runs(
     message = stuck_error_message(threshold_seconds)
 
     for log in stuck:
-        if activity is not None:
-            activity.request_execution_cancel(log.id)
-        if task_registry is not None:
-            task_registry.cancel_for_execution(log.id)
         if await executions.fail_if_running(log.id, message):
             failed += 1
+            if activity is not None:
+                activity.request_execution_cancel(log.id)
+            if task_registry is not None:
+                task_registry.cancel_for_execution(log.id)
             if on_failed is not None:
                 await on_failed(log.id)
 

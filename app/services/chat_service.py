@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -52,6 +53,7 @@ __all__ = ["ChatService", "ChatServiceError"]
 _TITLE_MAX_LEN = 60
 _RUNS_SESSION_TITLE = "Agent runs"
 _RUN_RESULT_KIND = "run_result"
+_UNTRUSTED_MEMORY_PREFIX = "[Untrusted memory of earlier turns — may be incomplete]\n"
 _HTML_CAPTION_MAX = 280
 _SCRATCHPAD_PREVIEW_MAX = 280
 _SCRATCHPAD_STATUS_NOTE = (
@@ -62,6 +64,13 @@ _SCRATCHPAD_STATUS_NOTE = (
 
 class ChatServiceError(RuntimeError):
     """User-facing chat failure (LLM / timeout / agent missing)."""
+
+
+@dataclass(frozen=True)
+class ChatSummaryUpdate:
+    summary: str
+    through_count: int
+
 
 
 class ChatService:
@@ -238,7 +247,8 @@ class ChatService:
         if summary_update is not None:
             await self._conversations.set_rolling_summary(
                 conversation.id,
-                summary_update,
+                summary_update.summary,
+                summary_update.through_count,
             )
         await self._record_usage(agent)
         return updated
@@ -280,7 +290,11 @@ class ChatService:
             window=self._settings.chat_history_window,
             summary_max_chars=self._settings.chat_summary_max_chars,
         )
-        memory = summary_update or conversation.rolling_summary
+        memory = (
+            summary_update.summary
+            if summary_update is not None
+            else conversation.rolling_summary
+        )
 
         if self._activity is not None:
             await self._activity.begin_chat(
@@ -369,7 +383,8 @@ class ChatService:
             if summary_update is not None:
                 await self._conversations.set_rolling_summary(
                     conversation.id,
-                    summary_update,
+                    summary_update.summary,
+                    summary_update.through_count,
                 )
             await self._record_usage(agent)
         except ChatServiceError as exc:
@@ -497,7 +512,7 @@ class ChatService:
         str,
         list[dict[str, Any]],
         Optional[str],
-        Optional[str],
+        Optional[ChatSummaryUpdate],
     ]:
         captured_html: dict[str, Optional[str]] = {"html": None}
 
@@ -512,16 +527,13 @@ class ChatService:
             summary_max_chars=self._settings.chat_summary_max_chars,
         )
         messages: list[Any] = [await self._system_message(agent)]
-        memory = summary_update or conversation.rolling_summary
+        memory = (
+            summary_update.summary
+            if summary_update is not None
+            else conversation.rolling_summary
+        )
         if memory:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "Memory of earlier conversation turns "
-                        "(may be incomplete):\n" + memory
-                    )
-                )
-            )
+            messages.append(_memory_message(memory))
         messages.extend(history)
 
         timeout = float(self._settings.chat_timeout_seconds)
@@ -580,14 +592,7 @@ class ChatService:
         graph = await self._build_graph(agent, on_html=on_html)
         messages: list[Any] = [await self._system_message(agent)]
         if memory:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "Memory of earlier conversation turns "
-                        "(may be incomplete):\n" + memory
-                    )
-                )
-            )
+            messages.append(_memory_message(memory))
         messages.extend(history)
 
         timeout = float(self._settings.chat_timeout_seconds)
@@ -760,7 +765,7 @@ def prepare_chat_memory(
     *,
     window: int,
     summary_max_chars: int,
-) -> tuple[list[Any], Optional[str]]:
+) -> tuple[list[Any], Optional[ChatSummaryUpdate]]:
     """Return the LangChain tail and an updated summary when history overflows."""
     usable = [
         message
@@ -768,18 +773,28 @@ def prepare_chat_memory(
         if message.kind != _RUN_RESULT_KIND
     ]
     kept, overflow = window_chat_messages(usable, window)
-    summary_update: Optional[str] = None
-    if overflow:
-        summary_messages: list[ChatMessage] = []
-        if conversation.rolling_summary:
-            summary_messages.append(
-                ChatMessage(
-                    role=ChatRole.assistant,
-                    content=conversation.rolling_summary,
-                )
-            )
-        summary_update = extractive_summary(
-            summary_messages + overflow,
-            max_chars=summary_max_chars,
+    summary_update: Optional[ChatSummaryUpdate] = None
+    overflow_count = len(overflow)
+    if overflow_count > conversation.summary_through_count:
+        newly_overflowed = overflow[conversation.summary_through_count :]
+        new_summary = extractive_summary(
+            newly_overflowed,
+            max_chars=0,
+        )
+        combined = "\n".join(
+            part
+            for part in (conversation.rolling_summary, new_summary)
+            if part
+        )
+        if summary_max_chars > 0 and len(combined) > summary_max_chars:
+            combined = combined[-summary_max_chars:]
+        summary_update = ChatSummaryUpdate(
+            summary=combined,
+            through_count=overflow_count,
         )
     return _history_to_langchain(kept, agent), summary_update
+
+
+def _memory_message(memory: str) -> HumanMessage:
+    """Keep persisted conversation memory at untrusted user-message priority."""
+    return HumanMessage(content=_UNTRUSTED_MEMORY_PREFIX + memory)

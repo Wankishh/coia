@@ -4130,7 +4130,11 @@ function renderActivity() {
                 <strong>${escapeHtml(item.title || kindLabel)}</strong>
                 <div class="activity-meta">
                   <span class="badge ${escapeHtml(statusLabel)}">${escapeHtml(statusLabel)}</span>
-                  <span>age ${formatDurationSeconds(item.duration_seconds)}</span>
+                  ${
+                    item.kind === "run" || item.duration_seconds > 0
+                      ? `<span>age ${formatDurationSeconds(item.duration_seconds)}</span>`
+                      : ""
+                  }
                   <span class="chip">${escapeHtml(kindLabel)}</span>
                   <span>${escapeHtml(agentLabel)}</span>
                   <span>${escapeHtml(fmtRelative(item.started_at))}</span>

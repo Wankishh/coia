@@ -407,12 +407,18 @@ class ConversationRepository:
         )
         return Conversation.model_validate(result) if result else None
 
-    async def set_rolling_summary(self, chat_id: str, summary: str) -> None:
+    async def set_rolling_summary(
+        self,
+        chat_id: str,
+        summary: str,
+        through_count: int,
+    ) -> None:
         await self._col.update_one(
             {"id": chat_id},
             {
                 "$set": {
                     "rolling_summary": summary,
+                    "summary_through_count": through_count,
                     "updated_at": _utcnow(),
                 }
             },
