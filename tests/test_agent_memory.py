@@ -1,16 +1,19 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.models.conversation import ChatMessage, ChatRole, Conversation
 from app.models.execution import ExecutionLog, ExecutionStatus, TriggerType
+from app.services.agent_runner import _prepend_run_memory
 from app.services.chat_service import prepare_chat_memory
 from app.services.memory import (
     extractive_summary,
     format_run_memory_block,
     window_chat_messages,
 )
+from app.services.repos import ExecutionRepository
 
 
 def _msg(role: ChatRole, content: str) -> ChatMessage:
@@ -86,3 +89,83 @@ def test_format_run_memory_block_includes_last_outputs():
     assert "Revenue up 3%" in block
     assert "LLM timeout" in block
     assert "Prior run memory" in block
+
+
+def test_empty_prior_run_memory_leaves_prompt_unchanged():
+    human = "Analyze the latest revenue."
+    assert _prepend_run_memory(human, "") == human
+
+
+class _FakeExecutionCursor:
+    def __init__(self, documents):
+        self.documents = documents
+        self.sort_args = None
+        self.limit_value = None
+
+    def sort(self, key, direction):
+        self.sort_args = (key, direction)
+        return self
+
+    def limit(self, value):
+        self.limit_value = value
+        return self
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for document in self.documents[: self.limit_value]:
+            yield document
+
+
+class _FakeExecutionCollection:
+    def __init__(self, documents):
+        self.cursor = _FakeExecutionCursor(documents)
+        self.query = None
+        self.projection = None
+
+    def find(self, query, projection):
+        self.query = query
+        self.projection = projection
+        return self.cursor
+
+
+@pytest.mark.asyncio
+async def test_list_recent_finished_excludes_current_and_returns_oldest_first():
+    newest = ExecutionLog(
+        id="newest",
+        agent_id="a1",
+        trigger_type=TriggerType.manual,
+        status=ExecutionStatus.failed,
+    )
+    oldest = ExecutionLog(
+        id="oldest",
+        agent_id="a1",
+        trigger_type=TriggerType.cron,
+        status=ExecutionStatus.completed,
+    )
+    collection = _FakeExecutionCollection(
+        [
+            newest.model_dump(mode="json"),
+            oldest.model_dump(mode="json"),
+        ]
+    )
+    repository = ExecutionRepository.__new__(ExecutionRepository)
+    repository._col = collection
+
+    rows = await repository.list_recent_finished(
+        "a1",
+        limit=2,
+        exclude_id="current",
+    )
+
+    assert [row.id for row in rows] == ["oldest", "newest"]
+    assert collection.query == {
+        "agent_id": "a1",
+        "status": {
+            "$in": ["completed", "failed", "cancelled"],
+        },
+        "id": {"$ne": "current"},
+    }
+    assert collection.cursor.sort_args == ("start_time", -1)
+    assert collection.cursor.limit_value == 2

@@ -489,6 +489,34 @@ class ExecutionRepository:
         )
         return [ExecutionLog.model_validate(doc) async for doc in cursor]
 
+    async def list_recent_finished(
+        self,
+        agent_id: str,
+        *,
+        limit: int = 3,
+        exclude_id: Optional[str] = None,
+    ) -> list[ExecutionLog]:
+        query: dict[str, Any] = {
+            "agent_id": agent_id,
+            "status": {
+                "$in": [
+                    ExecutionStatus.completed.value,
+                    ExecutionStatus.failed.value,
+                    ExecutionStatus.cancelled.value,
+                ]
+            },
+        }
+        if exclude_id:
+            query["id"] = {"$ne": exclude_id}
+        cursor = (
+            self._col.find(query, {"_id": 0})
+            .sort("start_time", -1)
+            .limit(limit)
+        )
+        rows = [ExecutionLog.model_validate(doc) async for doc in cursor]
+        rows.reverse()
+        return rows
+
     async def has_running(self, agent_id: str) -> bool:
         doc = await self._col.find_one(
             {"agent_id": agent_id, "status": ExecutionStatus.running.value},

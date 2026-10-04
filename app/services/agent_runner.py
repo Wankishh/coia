@@ -20,6 +20,7 @@ from app.services.message_content import (
     has_usable_run_deliverable,
     message_content_to_str,
 )
+from app.services.memory import format_run_memory_block
 from app.services.schema_context import (
     append_schema_to_system_prompt,
     build_attached_sources_schema_block,
@@ -43,6 +44,12 @@ from app.tools.factory import (
 logger = logging.getLogger(__name__)
 
 __all__ = ["AgentRunner", "AgentAlreadyRunningError"]
+
+
+def _prepend_run_memory(human: str, memory_block: str) -> str:
+    if not memory_block:
+        return human
+    return memory_block + "\n\n---\nCurrent task:\n" + human
 
 
 class AgentRunner:
@@ -154,11 +161,22 @@ class AgentRunner:
                 for_run=True,
             )
 
+            prior = await self._executions.list_recent_finished(
+                agent.id,
+                limit=self._settings.run_memory_last_n,
+                exclude_id=execution_id,
+            )
+            memory_block = format_run_memory_block(
+                prior,
+                each_max_chars=self._settings.run_memory_each_max_chars,
+            )
+            human = _prepend_run_memory(
+                interpolate_prompt(log.prompt or "", agent),
+                memory_block,
+            )
             messages: list[Any] = [
                 SystemMessage(content=system_text),
-                HumanMessage(
-                    content=interpolate_prompt(log.prompt or "", agent)
-                ),
+                HumanMessage(content=human),
             ]
 
             if self._activity is not None:
