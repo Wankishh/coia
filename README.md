@@ -56,7 +56,7 @@ Wait until health is green:
 curl http://localhost:8000/health
 ```
 
-### 3. Seed the demo Financial Analyst agent
+### 3. Seed the demo Finance Ops agent
 
 The seed script **writes the key onto the agent** (`api_key`). Pass `--api-key`, or set `SEED_AGENT_API_KEY` / `OPENAI_API_KEY` (etc.) only as a one-time convenience for seed — those env vars are not read when agents run.
 
@@ -74,7 +74,9 @@ python scripts/seed_demo.py --base-url http://localhost:8000 --api-key sk-... --
 
 You can also create/edit agents in the admin console and paste the API key there — no harness env key required.
 
-Seed persona defaults to **Financial Analyst** and is overridable via `SEED_AGENT_*` env vars (see `.env.example`).
+Seed persona defaults to **Finance Ops** (FP&A / sales-finance analytics on the demo SQL source) and is overridable via `SEED_AGENT_*` env vars (see `.env.example`).
+
+Built-in role templates (`GET /agent-templates`, 18 total): Finance Ops, Data Analyst, Sales Ops, Inventory Ops, Marketing Ops (analytics), Content Writer, Social Marketer, Research Assistant, Customer Support Agent, Exec Brief Writer, Ops / SRE Assistant, Email Marketer, Market Research Analyst, Technical Writer, E-commerce Specialist, Business Consultant, Translator, General Assistant.
 
 ### 4. View logs / executions
 
