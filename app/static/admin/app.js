@@ -195,6 +195,15 @@ function fmtRelative(value) {
   return label;
 }
 
+function formatDurationSeconds(total) {
+  const s = Math.max(0, Math.floor(Number(total) || 0));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
 /** Primary d/m/y H:m with optional muted relative secondary. */
 function fmtTimePrimary(value, { relative = true } = {}) {
   if (!value) return "—";
@@ -3759,15 +3768,28 @@ function renderExecTable() {
       </thead>
       <tbody>
         ${state.logs
-          .map(
-            (log) => `
+          .map((log) => {
+            const isStuck =
+              log.status === "failed" &&
+              String(log.error_message || "").startsWith("Stuck:");
+            const statusLabel = isStuck ? "failed · stuck" : log.status;
+            const elapsed =
+              log.status === "running"
+                ? formatDurationSeconds(
+                    (Date.now() - new Date(log.start_time).getTime()) / 1000,
+                  )
+                : "";
+            return `
           <tr data-id="${log.id}" class="${log.id === state.selectedExecutionId ? "selected" : ""}">
-            <td><span class="badge ${log.status}">${log.status}</span></td>
+            <td class="status-cell ${isStuck ? "execution-stuck" : ""}">
+              <span class="badge ${log.status}">${statusLabel}</span>
+              ${elapsed ? `<span class="muted">elapsed ${elapsed}</span>` : ""}
+            </td>
             <td><span class="badge ${log.trigger_type}">${log.trigger_type}</span></td>
             <td>${fmtTime(log.start_time)}</td>
             <td class="muted">${escapeHtml(log.id.slice(0, 8))}…</td>
-          </tr>`,
-          )
+          </tr>`;
+          })
           .join("")}
       </tbody>
     </table>`;
@@ -3784,6 +3806,16 @@ function renderExecutionDetail() {
     panel.innerHTML = `<div class="detail-empty">Select a run to inspect</div>`;
     return;
   }
+  const isStuck =
+    exec.status === "failed" &&
+    String(exec.error_message || "").startsWith("Stuck:");
+  const statusLabel = isStuck ? "failed · stuck" : exec.status;
+  const elapsed =
+    exec.status === "running"
+      ? formatDurationSeconds(
+          (Date.now() - new Date(exec.start_time).getTime()) / 1000,
+        )
+      : "";
   const steps = (exec.tool_calls || [])
     .map(
       (step) => `
@@ -3825,9 +3857,10 @@ function renderExecutionDetail() {
     </div>
     <div class="panel-body">
       <dl class="kv">
-        <div><dt>Status</dt><dd><span class="badge ${exec.status}">${exec.status}</span></dd></div>
+        <div><dt>Status</dt><dd class="${isStuck ? "execution-stuck" : ""}"><span class="badge ${exec.status}">${statusLabel}</span></dd></div>
         <div><dt>Trigger</dt><dd>${escapeHtml(exec.trigger_type)}</dd></div>
         <div><dt>Start</dt><dd>${fmtTime(exec.start_time)}</dd></div>
+        ${elapsed ? `<div><dt>Elapsed</dt><dd>${elapsed}</dd></div>` : ""}
         <div><dt>End</dt><dd>${fmtTime(exec.end_time)}</dd></div>
         <div><dt>Execution</dt><dd>${escapeHtml(exec.id)}</dd></div>
       </dl>
@@ -4081,6 +4114,10 @@ function renderActivity() {
           ${items
             .map((item) => {
               const kindLabel = item.kind === "run" ? "run" : "chat";
+              const isStuck = item.is_stuck || item.status === "stuck";
+              const statusLabel = isStuck
+                ? "stuck"
+                : item.status || "running";
               const agent =
                 state.agents.find((a) => a.id === item.agent_id) || null;
               const agentLabel =
@@ -4088,11 +4125,12 @@ function renderActivity() {
                 item.agent_name ||
                 agentName(item.agent_id);
               return `
-            <li class="activity-item" data-id="${escapeHtml(item.id)}">
+            <li class="activity-item ${isStuck ? "activity-stuck" : ""}" data-id="${escapeHtml(item.id)}">
               <div class="activity-item-main" data-act="open">
                 <strong>${escapeHtml(item.title || kindLabel)}</strong>
                 <div class="activity-meta">
-                  <span class="badge ${escapeHtml(item.status || "running")}">${escapeHtml(item.status || "running")}</span>
+                  <span class="badge ${escapeHtml(statusLabel)}">${escapeHtml(statusLabel)}</span>
+                  <span>age ${formatDurationSeconds(item.duration_seconds)}</span>
                   <span class="chip">${escapeHtml(kindLabel)}</span>
                   <span>${escapeHtml(agentLabel)}</span>
                   <span>${escapeHtml(fmtRelative(item.started_at))}</span>

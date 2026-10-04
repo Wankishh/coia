@@ -825,6 +825,12 @@ button,
   background: rgba(255, 255, 255, 0.02);
 }
 
+.activity-stuck,
+.execution-stuck {
+  color: var(--bad);
+  font-weight: 600;
+}
+
 .activity-item-main {
   display: flex;
   flex-direction: column;
