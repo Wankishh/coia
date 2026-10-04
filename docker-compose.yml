@@ -1,0 +1,74 @@
+services:
+  mongo:
+    image: mongo:7
+    # Host ports intentionally not published by default (DB stays on the compose network).
+    # For local tools (mongosh / Compass), re-enable:
+    #   ports: ["27017:27017"]
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  demo-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    # Host ports intentionally not published by default.
+    # For local psql / GUI tools, re-enable:
+    #   ports: ["5432:5432"]
+    volumes:
+      - demo_db_data:/var/lib/postgresql/data
+      # First-boot only (empty volume). Re-runs use demo-db-seed / load_demo_db.py.
+      - ./init_demo_db.sql:/docker-entrypoint-initdb.d/init_demo_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: re-apply idempotent seed every `compose up` without wiping the volume.
+  demo-db-seed:
+    build: .
+    restart: "no"
+    environment:
+      DEMO_DATABASE_URL: postgresql+psycopg2://demo:demo@demo-db:5432/demo
+    volumes:
+      - ./init_demo_db.sql:/app/init_demo_db.sql:ro
+      - ./scripts/load_demo_db.py:/app/scripts/load_demo_db.py:ro
+    entrypoint: ["python", "scripts/load_demo_db.py"]
+    depends_on:
+      demo-db:
+        condition: service_healthy
+
+  coia-agent-harness:
+    build: .
+    ports:
+      - "8000:8000"
+    # Reach host Ollama from the container (Linux needs host-gateway).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      MONGODB_URL: mongodb://mongo:27017
+      MONGODB_DB: coia_agents
+      DEMO_DATABASE_URL: postgresql+psycopg2://demo:demo@demo-db:5432/demo
+      WORKSPACE_ROOT: /app/data/agent_workspaces
+    volumes:
+      - ./data/agent_workspaces:/app/data/agent_workspaces
+    depends_on:
+      mongo:
+        condition: service_healthy
+      demo-db:
+        condition: service_healthy
+      demo-db-seed:
+        condition: service_completed_successfully
+
+volumes:
+  mongo_data:
+  demo_db_data:

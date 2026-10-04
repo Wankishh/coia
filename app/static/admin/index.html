@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coia Agents — Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/admin/styles.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/easymde@2.18.0/dist/easymde.min.css"
+    />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <div class="app">
+      <aside class="rail">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <p class="brand-name">Coia Agents</p>
+            <p class="brand-sub">Harness console</p>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button type="button" class="nav-item active" data-view="agents">
+            Agents
+          </button>
+          <button type="button" class="nav-item" data-view="chat">
+            Chat
+            <span class="nav-count" id="nav-chat-count" hidden>0</span>
+          </button>
+          <button type="button" class="nav-item" data-view="activity">
+            Activity
+            <span class="nav-count" id="nav-activity-count" hidden>0</span>
+          </button>
+          <button type="button" class="nav-item" data-view="sources">
+            Data sources
+          </button>
+          <button type="button" class="nav-item" data-view="executions">
+            Executions
+          </button>
+          <button type="button" class="nav-item" data-view="system">
+            System
+          </button>
+        </nav>
+
+        <div class="rail-foot">
+          <div id="health-pill" class="health-pill" title="System health">
+            <span class="dot"></span>
+            <span id="health-label">checking…</span>
+          </div>
+          <button type="button" id="btn-refresh" class="ghost-btn">Refresh</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="top">
+          <div>
+            <h1 id="view-title">Agents</h1>
+            <p id="view-sub" class="muted">
+              Create, configure, and run agents on this harness.
+            </p>
+          </div>
+          <div class="top-actions" id="top-actions"></div>
+        </header>
+
+        <section id="view-agents" class="view active"></section>
+        <section id="view-chat" class="view">
+          <div id="chat-empty" class="panel" hidden>
+            <div class="empty">
+              No agents yet. Create one under <strong>Agents</strong> to start
+              chatting.
+            </div>
+          </div>
+          <div class="chat-view" id="chat-workspace" hidden>
+            <aside class="chat-sidebar" aria-label="Sessions">
+              <div class="chat-sidebar-head">
+                <div class="chat-sidebar-title">
+                  <strong>Sessions</strong>
+                  <span class="muted" id="chat-session-count"></span>
+                </div>
+                <label class="chat-session-search">
+                  <span class="sr-only">Search sessions</span>
+                  <input
+                    type="search"
+                    id="chat-session-search"
+                    placeholder="Search title or agent…"
+                    autocomplete="off"
+                  />
+                </label>
+                <div class="chat-filter-chips" role="group" aria-label="Agent filter">
+                  <button type="button" class="chip-btn active" data-filter="all" id="chat-filter-all">
+                    All agents
+                  </button>
+                  <button type="button" class="chip-btn" data-filter="agent" id="chat-filter-agent">
+                    This agent
+                  </button>
+                </div>
+                <div class="chat-filter-chips" role="group" aria-label="Session type">
+                  <button type="button" class="chip-btn active" data-kind="all" id="chat-kind-all">
+                    All
+                  </button>
+                  <button type="button" class="chip-btn" data-kind="runs" id="chat-kind-runs">
+                    Runs only
+                  </button>
+                  <button type="button" class="chip-btn" data-kind="chats" id="chat-kind-chats">
+                    Chats
+                  </button>
+                </div>
+                <label class="chat-session-sort">
+                  <span class="muted">Sort</span>
+                  <select id="chat-session-sort" aria-label="Sort sessions">
+                    <option value="newest" selected>Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                  </select>
+                </label>
+                <button type="button" class="ghost-btn" id="chat-new">New session</button>
+              </div>
+              <ul id="chat-list" class="chat-list"></ul>
+            </aside>
+            <section class="chat-main">
+              <div class="chat-thread-head" id="chat-thread-head">
+                <div class="chat-thread-meta">
+                  <label class="chat-agent-picker">
+                    <span id="chat-agent-avatar" class="agent-avatar sm" hidden aria-hidden="true"></span>
+                    <span class="muted">Agent</span>
+                    <select id="chat-agent-select" aria-label="Select agent">
+                      <option value="">Select agent…</option>
+                    </select>
+                  </label>
+                  <strong id="chat-active-title">New session</strong>
+                  <span class="muted" id="chat-active-updated"></span>
+                </div>
+                <div class="row-actions">
+                  <button type="button" class="ghost-btn" id="chat-rename" hidden>Rename</button>
+                  <button type="button" class="danger-btn" id="chat-delete" hidden>Delete</button>
+                </div>
+              </div>
+              <div id="chat-messages" class="chat-messages"></div>
+              <div id="chat-attachments" class="chat-attachments" hidden></div>
+              <form id="chat-form" class="chat-composer">
+                <textarea
+                  id="chat-input"
+                  name="content"
+                  rows="2"
+                  placeholder="Message the agent…"
+                  required
+                ></textarea>
+                <div class="chat-composer-actions">
+                  <label class="ghost-btn chat-attach-btn" title="Attach file" id="chat-attach-label">
+                    <span aria-hidden="true">📎</span>
+                    <span class="sr-only">Attach file</span>
+                    <input type="file" id="chat-attach" hidden />
+                  </label>
+                  <button type="button" class="ghost-btn" id="chat-cancel" hidden>Cancel</button>
+                  <button type="submit" class="primary-btn" id="chat-send">Send</button>
+                </div>
+              </form>
+              <p class="hint" id="chat-status" hidden></p>
+            </section>
+          </div>
+        </section>
+        <section id="view-activity" class="view"></section>
+        <section id="view-sources" class="view"></section>
+        <section id="view-executions" class="view"></section>
+        <section id="view-system" class="view"></section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <dialog id="agent-dialog" class="dialog">
+      <form id="agent-form" method="dialog">
+        <header class="dialog-head">
+          <h2 id="agent-dialog-title">New agent</h2>
+          <button type="button" class="icon-btn" id="agent-dialog-close" aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="dialog-body grid-2">
+          <div class="span-2 template-picker" id="agent-template-picker">
+            <label>
+              Start from template
+              <select id="agent-template-select" name="template">
+                <option value="">Blank</option>
+              </select>
+            </label>
+            <p class="hint" id="agent-template-hint">
+              Templates autofill prompts and model suggestions. API key and schedule stay empty / Off.
+            </p>
+          </div>
+          <p class="span-2 hint" id="agent-template-edit-note" hidden>
+            Templates apply only when creating a new agent.
+          </p>
+          <section class="span-2 avatar-section" id="agent-avatar-section">
+            <div class="avatar-section-head">
+              <h3>Avatar</h3>
+              <span class="muted">Preset or upload — defaults to initials</span>
+            </div>
+            <div class="avatar-editor">
+              <div id="agent-avatar-preview" class="agent-avatar lg" aria-hidden="true"></div>
+              <div class="avatar-editor-controls">
+                <div class="avatar-presets" id="agent-avatar-presets" role="listbox" aria-label="Avatar presets"></div>
+                <div class="avatar-upload-row">
+                  <label class="ghost-btn avatar-upload-btn">
+                    Upload image
+                    <input type="file" id="agent-avatar-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+                  </label>
+                  <button type="button" class="ghost-btn" id="agent-avatar-clear" hidden>Use initials</button>
+                </div>
+                <p class="hint">PNG, JPG, WebP, or GIF up to 2&nbsp;MB.</p>
+              </div>
+            </div>
+          </section>
+          <label>
+            Name
+            <input name="name" required maxlength="120" placeholder="Josh" />
+            <span class="hint">Display / persona name (e.g. Josh)</span>
+          </label>
+          <label>
+            Role
+            <input name="role" required maxlength="120" placeholder="analyst" />
+          </label>
+          <label>
+            Provider
+            <select name="provider" id="agent-provider" required>
+              <option value="openai">openai</option>
+              <option value="anthropic">anthropic</option>
+              <option value="google">google</option>
+              <option value="openrouter">openrouter</option>
+              <option value="ollama">ollama</option>
+            </select>
+          </label>
+          <label class="span-2" id="agent-base-url-wrap" hidden>
+            Ollama endpoint
+            <input
+              name="base_url"
+              id="agent-base-url"
+              type="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="http://host.docker.internal:11434/v1"
+            />
+            <span class="hint" id="base-url-hint"
+              >OpenAI-compatible base URL. Leave blank to use OLLAMA_BASE_URL (default host.docker.internal:11434/v1).</span
+            >
+          </label>
+          <label>
+            Model
+            <div class="model-combobox" id="agent-model-combobox">
+              <input
+                type="text"
+                name="model_name"
+                id="agent-model-input"
+                required
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Search or type a model id…"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded="false"
+                aria-controls="agent-model-list"
+              />
+              <ul
+                id="agent-model-list"
+                class="model-combobox-list"
+                role="listbox"
+                hidden
+              ></ul>
+            </div>
+            <span class="hint" id="model-fetch-hint" hidden></span>
+          </label>
+          <label class="span-2" id="custom-model-wrap" hidden>
+            Custom model id
+            <input name="custom_model" id="agent-custom-model" placeholder="provider model id (e.g. openai/gpt-4o)" />
+            <span class="hint">Used when the combobox is set to Custom model…</span>
+          </label>
+          <label class="span-2">
+            API key
+            <input
+              name="api_key"
+              id="agent-api-key"
+              type="password"
+              autocomplete="off"
+              placeholder="sk-…"
+            />
+            <span class="hint" id="api-key-hint">Required for new agents. Stored on the agent, not in harness env.</span>
+          </label>
+          <div class="span-2 scheduler" id="cron-scheduler">
+            <label>
+              Schedule
+              <select name="cron_preset" id="cron-preset">
+                <option value="off">Off</option>
+                <option value="every_minute">Every minute</option>
+                <option value="every_5">Every 5 minutes</option>
+                <option value="every_15">Every 15 minutes</option>
+                <option value="hourly">Hourly</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="custom">Custom (crontab)</option>
+              </select>
+            </label>
+            <div class="scheduler-extras" id="cron-daily-wrap" hidden>
+              <label>
+                Time (UTC)
+                <input type="time" name="cron_time" id="cron-time" value="09:00" />
+              </label>
+            </div>
+            <div class="scheduler-block" id="cron-weekly-wrap" hidden>
+              <div>
+                <span class="field-label">Weekdays</span>
+                <div class="day-grid weekdays" id="cron-weekday-grid">
+                  <label class="day-check"><input type="checkbox" name="cron_weekday" value="1" checked /> Mon</label>
+                  <label class="day-check"><input type="checkbox" name="cron_weekday" value="2" /> Tue</label>
+                  <label class="day-check"><input type="checkbox" name="cron_weekday" value="3" /> Wed</label>
+                  <label class="day-check"><input type="checkbox" name="cron_weekday" value="4" /> Thu</label>
+                  <label class="day-check"><input type="checkbox" name="cron_weekday" value="5" /> Fri</label>
+                  <label class="day-check"><input type="checkbox" name="cron_weekday" value="6" /> Sat</label>
+                  <label class="day-check"><input type="checkbox" name="cron_weekday" value="0" /> Sun</label>
+                </div>
+              </div>
+              <label>
+                Time (UTC)
+                <input type="time" name="cron_weekly_time" id="cron-weekly-time" value="09:00" />
+              </label>
+            </div>
+            <div class="scheduler-block" id="cron-monthly-wrap" hidden>
+              <div>
+                <span class="field-label">Days of month</span>
+                <div class="day-grid monthdays" id="cron-monthday-grid"></div>
+              </div>
+              <label>
+                Time (UTC)
+                <input type="time" name="cron_monthly_time" id="cron-monthly-time" value="09:00" />
+              </label>
+            </div>
+            <div class="scheduler-extras" id="cron-custom-wrap" hidden>
+              <label>
+                Crontab (5 fields)
+                <input
+                  name="cron_custom"
+                  id="cron-custom"
+                  placeholder="0 9 * * 1,3,5"
+                  spellcheck="false"
+                />
+              </label>
+              <p class="hint">Advanced: minute hour day-of-month month day-of-week</p>
+            </div>
+            <p class="hint" id="cron-preview">Schedule: off</p>
+          </div>
+          <label class="span-2">
+            System prompt
+            <textarea name="system_prompt" id="agent-system-prompt" rows="5"></textarea>
+            <span class="hint">Placeholders: {{name}}, {{role}}, {{provider}}, {{model}}</span>
+          </label>
+          <label class="span-2">
+            Default prompt
+            <textarea
+              name="default_prompt"
+              id="agent-default-prompt"
+              rows="3"
+              placeholder="Used for cron / Run now"
+            ></textarea>
+          </label>
+          <label class="span-2">
+            Handoff agent (optional)
+            <select name="handoff_agent_id" id="agent-handoff-select">
+              <option value="">None</option>
+            </select>
+            <span class="hint">After an HTML report, you can send it to this agent’s Handoffs session.</span>
+          </label>
+          <section class="span-2 sources-section" id="sources-section">
+            <div class="sources-head">
+              <h3>Attach sources</h3>
+              <button type="button" class="ghost-btn" id="btn-manage-sources" data-view-jump="sources">
+                Manage in Data sources
+              </button>
+            </div>
+            <p class="hint">
+              Select library sources this agent can use. Create and edit configs under
+              <strong>Data sources</strong>.
+            </p>
+            <label class="attach-search">
+              <span class="field-label">Search</span>
+              <input type="search" id="attach-sources-filter" placeholder="Filter by title, type, description…" />
+            </label>
+            <div id="attach-sources-list" class="attach-sources-list"></div>
+          </section>
+        </div>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="agent-dialog-cancel">Cancel</button>
+          <button type="submit" class="primary-btn" id="agent-dialog-save">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="source-dialog" class="dialog wide">
+      <form id="source-form" method="dialog">
+        <header class="dialog-head">
+          <h2 id="source-dialog-title">New data source</h2>
+          <button type="button" class="icon-btn" id="source-dialog-close" aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="dialog-body" id="source-form-body"></div>
+        <p class="hint source-test-result" id="source-test-result" hidden></p>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="source-dialog-test">Test connection</button>
+          <span class="dialog-foot-spacer"></span>
+          <button type="button" class="ghost-btn" id="source-dialog-cancel">Cancel</button>
+          <button type="submit" class="primary-btn" id="source-dialog-save">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="run-dialog" class="dialog">
+      <form id="run-form" method="dialog">
+        <header class="dialog-head">
+          <h2>Run agent</h2>
+          <button type="button" class="icon-btn" id="run-dialog-close" aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="dialog-body">
+          <p class="muted" id="run-agent-label"></p>
+          <label>
+            Prompt override (optional)
+            <textarea name="prompt" rows="4" placeholder="Leave empty to use default_prompt"></textarea>
+          </label>
+        </div>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="run-dialog-cancel">Cancel</button>
+          <button type="submit" class="primary-btn">Start run</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="report-dialog" class="dialog wide">
+      <header class="dialog-head">
+        <h2>HTML report</h2>
+        <button type="button" class="icon-btn" id="report-dialog-close" aria-label="Close">
+          ×
+        </button>
+      </header>
+      <div class="dialog-body report-frame-wrap">
+        <iframe id="report-frame" title="Execution HTML report" sandbox=""></iframe>
+      </div>
+    </dialog>
+
+    <dialog id="rename-dialog" class="dialog narrow">
+      <form id="rename-form" method="dialog">
+        <header class="dialog-head">
+          <h2>Rename session</h2>
+          <button type="button" class="icon-btn" id="rename-dialog-close" aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="dialog-body">
+          <label>
+            Title
+            <input
+              id="rename-input"
+              name="title"
+              required
+              maxlength="200"
+              autocomplete="off"
+              placeholder="Session title"
+            />
+          </label>
+        </div>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="rename-dialog-cancel" value="cancel">
+            Cancel
+          </button>
+          <button type="submit" class="primary-btn" value="confirm">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="dialog narrow">
+      <form id="confirm-form" method="dialog">
+        <header class="dialog-head">
+          <h2 id="confirm-dialog-title">Confirm</h2>
+          <button type="button" class="icon-btn" id="confirm-dialog-close" aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="dialog-body">
+          <p id="confirm-dialog-message" class="confirm-message"></p>
+        </div>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="confirm-dialog-cancel" value="cancel">
+            Cancel
+          </button>
+          <button type="submit" class="danger-btn" id="confirm-dialog-ok" value="confirm">
+            Delete
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <script src="https://cdn.jsdelivr.net/npm/easymde@2.18.0/dist/easymde.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
+    <script src="/admin/app.js?v=20261004a" type="module"></script>
+  </body>
+</html>

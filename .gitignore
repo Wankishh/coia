@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+data/agent_workspaces/*
+!data/agent_workspaces/.gitkeep
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+*.log
+
+# Runtime workspaces (local harness output)
+app/data/
+data/agent_workspaces/*
+!data/agent_workspaces/.gitkeep

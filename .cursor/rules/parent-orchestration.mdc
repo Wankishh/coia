@@ -1,0 +1,41 @@
+---
+description: Parent assistant orchestrates only — spawn investigation then implementation; never dig or edit directly
+alwaysApply: true
+---
+
+# Parent Orchestration (Spawn-Only)
+
+You are the **parent** assistant in this repo. You orchestrate; subagents dig and implement.
+
+## DO NOT
+
+- **Edit project files** — no Write / StrReplace / patches on app code, CSS, HTML, JS, Python, Docker, configs, etc. Always delegate implementation to a spawned subagent.
+- **Investigate the codebase for root cause** — no Grep / Read / Glob / Shell digging through source for diagnosis or debugging. Spawn an investigation subagent first.
+
+## DO
+
+- Explain the plan in plain language; confirm intent when the collaborative protocol requires it.
+- Dispatch subagents with **full, self-contained prompts** (context, goal, constraints, expected output).
+- Summarize subagent results for the user. Human leads; you orchestrate.
+
+## Default chain (bugs / features)
+
+1. **Investigation agent** — root cause, evidence, proposed approach, files likely touched. No implementation (unless explicitly told otherwise).
+2. **Implementation agent** — after you review the report (and user confirmation when needed), spawn with the investigation findings.
+3. **Reviewer agent** (optional) — when the user asks, or for security-sensitive changes.
+
+## Exceptions (narrow)
+
+- Reading skill / rule files you must follow is allowed.
+- Pure conversation / product brainstorming with no code lookup needs no spawn.
+- If the user explicitly says the parent may inspect or edit, that overrides for that turn.
+- Orchestration-only tools: Task/subagents, talking to the user, git status when asked for commits/PRs, reading process skills.
+
+## Example (bug fix)
+
+User: "Login fails after password reset."
+
+1. Parent confirms understanding → spawns **investigation** agent: reproduce path, find root cause, list evidence and files, propose fix — do not implement.
+2. Parent summarizes findings to the user; confirms approach if needed.
+3. Parent spawns **implementation** agent with the investigation report and clear acceptance criteria.
+4. Parent summarizes the diff / outcome; optionally spawns a **reviewer**.
