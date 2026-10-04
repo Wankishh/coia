@@ -98,7 +98,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         usage_repo,
     )
     task_registry = TaskRegistry()
-    scheduler = AgentScheduler(agent_repo, execution_repo, runner, task_registry)
+
+    async def post_stuck_run_to_chat(execution_id: str) -> None:
+        try:
+            log = await execution_repo.get(execution_id)
+            if log is not None:
+                await chat_service.post_run_result(log)
+        except Exception:  # noqa: BLE001 — chat notification is best-effort
+            logger.warning(
+                "Failed to post stuck execution %s to Agent runs chat",
+                execution_id,
+                exc_info=True,
+            )
+
+    scheduler = AgentScheduler(
+        agent_repo,
+        execution_repo,
+        runner,
+        task_registry,
+        activity=activity_registry,
+        stuck_threshold_seconds=settings.run_stuck_seconds,
+        stuck_sweep_interval_seconds=settings.stuck_sweep_interval_seconds,
+        on_stuck_failed=post_stuck_run_to_chat,
+    )
 
     app.state.settings = settings
     app.state.mongo = mongo
