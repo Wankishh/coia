@@ -1,7 +1,11 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-from app.models.conversation import ChatMessage, ChatRole
+from langchain_core.messages import AIMessage, HumanMessage
+
+from app.models.conversation import ChatMessage, ChatRole, Conversation
 from app.models.execution import ExecutionLog, ExecutionStatus, TriggerType
+from app.services.chat_service import prepare_chat_memory
 from app.services.memory import (
     extractive_summary,
     format_run_memory_block,
@@ -25,6 +29,40 @@ def test_extractive_summary_is_bounded():
     summary = extractive_summary(msgs, max_chars=200)
     assert len(summary) <= 200
     assert "user:" in summary.lower() or "User:" in summary
+
+
+def test_prepare_chat_memory_passes_only_windowed_tail_to_langchain():
+    messages = [
+        _msg(
+            ChatRole.user if index % 2 == 0 else ChatRole.assistant,
+            f"message-{index}",
+        )
+        for index in range(30)
+    ]
+    messages.insert(
+        25,
+        ChatMessage(
+            role=ChatRole.assistant,
+            content="scheduled run output",
+            kind="run_result",
+        ),
+    )
+    conversation = Conversation(agent_id="a1", messages=messages)
+
+    tail, summary_update = prepare_chat_memory(
+        conversation,
+        SimpleNamespace(),
+        window=8,
+        summary_max_chars=2000,
+    )
+
+    assert len(tail) == 8
+    assert [message.content for message in tail] == [
+        f"message-{index}" for index in range(22, 30)
+    ]
+    assert all(isinstance(message, (HumanMessage, AIMessage)) for message in tail)
+    assert summary_update is not None
+    assert "scheduled run output" not in summary_update
 
 
 def test_format_run_memory_block_includes_last_outputs():

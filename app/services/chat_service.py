@@ -26,6 +26,7 @@ from app.services.message_content import (
     message_content_to_str,
     truncate_for_chat,
 )
+from app.services.memory import extractive_summary, window_chat_messages
 from app.services.prompt_interpolate import interpolate_prompt
 from app.services.repos import (
     AgentRepository,
@@ -216,9 +217,14 @@ class ChatService:
         agent = await self._require_agent(conversation.agent_id)
 
         try:
-            assistant_text, tool_calls, html = await self._run_agent_turn(
+            (
+                assistant_text,
+                tool_calls,
+                html,
+                summary_update,
+            ) = await self._run_agent_turn(
                 agent,
-                conversation.messages,
+                conversation,
             )
         except ChatServiceError:
             raise
@@ -229,6 +235,11 @@ class ChatService:
         updated = await self._persist_assistant(
             chat_id, assistant_text, tool_calls, html=html
         )
+        if summary_update is not None:
+            await self._conversations.set_rolling_summary(
+                conversation.id,
+                summary_update,
+            )
         await self._record_usage(agent)
         return updated
 
@@ -263,6 +274,14 @@ class ChatService:
             yield {"event": "error", "data": {"message": "Agent not found"}}
             return
 
+        history, summary_update = prepare_chat_memory(
+            conversation,
+            agent,
+            window=self._settings.chat_history_window,
+            summary_max_chars=self._settings.chat_summary_max_chars,
+        )
+        memory = summary_update or conversation.rolling_summary
+
         if self._activity is not None:
             await self._activity.begin_chat(
                 chat_id,
@@ -280,7 +299,10 @@ class ChatService:
 
         try:
             async for event in self._stream_agent_turn(
-                agent, conversation.messages, on_html=on_html
+                agent,
+                history,
+                memory=memory,
+                on_html=on_html,
             ):
                 if self._activity and self._activity.is_chat_cancelled(chat_id):
                     cancelled = True
@@ -344,6 +366,11 @@ class ChatService:
             await self._persist_assistant(
                 chat_id, assistant_text, tool_calls, html=html
             )
+            if summary_update is not None:
+                await self._conversations.set_rolling_summary(
+                    conversation.id,
+                    summary_update,
+                )
             await self._record_usage(agent)
         except ChatServiceError as exc:
             yield {"event": "error", "data": {"message": str(exc)}}
@@ -465,16 +492,37 @@ class ChatService:
     async def _run_agent_turn(
         self,
         agent,
-        history: list[ChatMessage],
-    ) -> tuple[str, list[dict[str, Any]], Optional[str]]:
+        conversation: Conversation,
+    ) -> tuple[
+        str,
+        list[dict[str, Any]],
+        Optional[str],
+        Optional[str],
+    ]:
         captured_html: dict[str, Optional[str]] = {"html": None}
 
         def on_html(html: str) -> None:
             captured_html["html"] = html
 
         graph = await self._build_graph(agent, on_html=on_html)
+        history, summary_update = prepare_chat_memory(
+            conversation,
+            agent,
+            window=self._settings.chat_history_window,
+            summary_max_chars=self._settings.chat_summary_max_chars,
+        )
         messages: list[Any] = [await self._system_message(agent)]
-        messages.extend(_history_to_langchain(history, agent))
+        memory = summary_update or conversation.rolling_summary
+        if memory:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "Memory of earlier conversation turns "
+                        "(may be incomplete):\n" + memory
+                    )
+                )
+            )
+        messages.extend(history)
 
         timeout = float(self._settings.chat_timeout_seconds)
         try:
@@ -519,18 +567,28 @@ class ChatService:
         if not assistant_text.strip():
             assistant_text = "(No text reply from agent.)"
         html = captured_html["html"] or extract_html_from_text(assistant_text)
-        return assistant_text, tool_calls, html
+        return assistant_text, tool_calls, html, summary_update
 
     async def _stream_agent_turn(
         self,
         agent,
-        history: list[ChatMessage],
+        history: list[Any],
         *,
+        memory: str = "",
         on_html=None,
     ) -> AsyncIterator[dict[str, Any]]:
         graph = await self._build_graph(agent, on_html=on_html)
         messages: list[Any] = [await self._system_message(agent)]
-        messages.extend(_history_to_langchain(history, agent))
+        if memory:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "Memory of earlier conversation turns "
+                        "(may be incomplete):\n" + memory
+                    )
+                )
+            )
+        messages.extend(history)
 
         timeout = float(self._settings.chat_timeout_seconds)
         try:
@@ -694,3 +752,34 @@ def _history_to_langchain(history: list[ChatMessage], agent: Any) -> list[Any]:
                 continue
             out.append(AIMessage(content=msg.content or ""))
     return out
+
+
+def prepare_chat_memory(
+    conversation: Conversation,
+    agent: Any,
+    *,
+    window: int,
+    summary_max_chars: int,
+) -> tuple[list[Any], Optional[str]]:
+    """Return the LangChain tail and an updated summary when history overflows."""
+    usable = [
+        message
+        for message in conversation.messages
+        if message.kind != _RUN_RESULT_KIND
+    ]
+    kept, overflow = window_chat_messages(usable, window)
+    summary_update: Optional[str] = None
+    if overflow:
+        summary_messages: list[ChatMessage] = []
+        if conversation.rolling_summary:
+            summary_messages.append(
+                ChatMessage(
+                    role=ChatRole.assistant,
+                    content=conversation.rolling_summary,
+                )
+            )
+        summary_update = extractive_summary(
+            summary_messages + overflow,
+            max_chars=summary_max_chars,
+        )
+    return _history_to_langchain(kept, agent), summary_update

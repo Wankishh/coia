@@ -407,6 +407,17 @@ class ConversationRepository:
         )
         return Conversation.model_validate(result) if result else None
 
+    async def set_rolling_summary(self, chat_id: str, summary: str) -> None:
+        await self._col.update_one(
+            {"id": chat_id},
+            {
+                "$set": {
+                    "rolling_summary": summary,
+                    "updated_at": _utcnow(),
+                }
+            },
+        )
+
     async def delete(self, chat_id: str) -> bool:
         result = await self._col.delete_one({"id": chat_id})
         return result.deleted_count > 0

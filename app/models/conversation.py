@@ -87,6 +87,7 @@ class Conversation(BaseModel):
     agent_id: str
     title: str = "Chat"
     messages: list[ChatMessage] = Field(default_factory=list)
+    rolling_summary: str = ""
     attachments: list[ChatAttachment] = Field(default_factory=list)
     last_read_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=_utcnow)
