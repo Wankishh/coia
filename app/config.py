@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     harness_port: int = 8000
     # Sync chat turn timeout (seconds); chat does not use ExecutionLog.
     chat_timeout_seconds: int = 120
+    # Wall-clock age after which a running ExecutionLog is treated as stuck.
+    run_stuck_seconds: int = 1800
+    # How often the sweeper looks for stuck runs.
+    stuck_sweep_interval_seconds: int = 60
     # OpenAI-compatible Ollama base (host/LAN). Used when agent.base_url is unset.
     ollama_base_url: str = "http://host.docker.internal:11434/v1"
 

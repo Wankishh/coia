@@ -493,6 +493,16 @@ class ExecutionRepository:
         )
         return [ExecutionLog.model_validate(doc) async for doc in cursor]
 
+    async def list_running_older_than(self, cutoff: datetime) -> list[ExecutionLog]:
+        cursor = self._col.find(
+            {
+                "status": ExecutionStatus.running.value,
+                "start_time": {"$lte": cutoff},
+            },
+            {"_id": 0},
+        ).sort("start_time", 1)
+        return [ExecutionLog.model_validate(doc) async for doc in cursor]
+
     async def get_latest_failed(self, agent_id: str) -> Optional[ExecutionLog]:
         doc = await self._col.find_one(
             {"agent_id": agent_id, "status": ExecutionStatus.failed.value},
@@ -517,6 +527,23 @@ class ExecutionRepository:
             },
         )
         return int(result.modified_count)
+
+    async def fail_if_running(
+        self,
+        execution_id: str,
+        error_message: str,
+    ) -> bool:
+        result = await self._col.update_one(
+            {"id": execution_id, "status": ExecutionStatus.running.value},
+            {
+                "$set": {
+                    "status": ExecutionStatus.failed.value,
+                    "error_message": error_message,
+                    "end_time": _utcnow(),
+                }
+            },
+        )
+        return int(result.modified_count) == 1
 
     async def append_step(self, execution_id: str, step: ToolCallRecord) -> None:
         await self._col.update_one(
