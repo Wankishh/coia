@@ -89,6 +89,8 @@ class AgentCreate(BaseModel):
     api_key: str = ""
     # Optional OpenAI-compatible endpoint override (meaningful for ollama).
     base_url: Optional[str] = None
+    # Optional override for generate_image; else provider default image model.
+    image_model: Optional[str] = None
     enabled_tools: list[str] = Field(default_factory=list)
     cron_schedule: Optional[str] = None
     # When True, cron jobs are unscheduled; schedule string is kept for resume.
@@ -114,6 +116,14 @@ class AgentCreate(BaseModel):
     def normalize_base_url(cls, value: Optional[str]) -> Optional[str]:
         return _normalize_optional_url(value)
 
+    @field_validator("image_model")
+    @classmethod
+    def normalize_image_model(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
     @model_validator(mode="after")
     def api_key_required_unless_ollama(self) -> Self:
         if self.provider != LLMProvider.ollama and not self.api_key:
@@ -129,6 +139,7 @@ class AgentUpdate(BaseModel):
     model_name: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    image_model: Optional[str] = None
     enabled_tools: Optional[list[str]] = None
     cron_schedule: Optional[str] = None
     paused: Optional[bool] = None
@@ -154,6 +165,14 @@ class AgentUpdate(BaseModel):
     def normalize_base_url(cls, value: Optional[str]) -> Optional[str]:
         return _normalize_optional_url(value)
 
+    @field_validator("image_model")
+    @classmethod
+    def normalize_image_model(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
 
 class AgentConfig(BaseModel):
     """Internal / stored agent document (includes api_key)."""
@@ -167,6 +186,8 @@ class AgentConfig(BaseModel):
     api_key: str = ""
     # Optional OpenAI-compatible endpoint override (meaningful for ollama).
     base_url: Optional[str] = None
+    # Optional override for generate_image; else provider default image model.
+    image_model: Optional[str] = None
     enabled_tools: list[str] = Field(default_factory=list)
     cron_schedule: Optional[str] = None
     # Missing/false in stored docs = active (cron may run if scheduled).
@@ -195,6 +216,7 @@ class AgentPublic(BaseModel):
     api_key_set: bool
     api_key_preview: Optional[str] = None
     base_url: Optional[str] = None
+    image_model: Optional[str] = None
     enabled_tools: list[str] = Field(default_factory=list)
     cron_schedule: Optional[str] = None
     paused: bool = False
@@ -256,6 +278,7 @@ def to_public(
         api_key_set=preview is not None,
         api_key_preview=preview,
         base_url=agent.base_url,
+        image_model=agent.image_model,
         enabled_tools=agent.enabled_tools,
         cron_schedule=agent.cron_schedule,
         paused=bool(agent.paused),

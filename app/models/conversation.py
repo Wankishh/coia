@@ -44,6 +44,8 @@ class ChatMessage(BaseModel):
     execution_id: Optional[str] = None
     kind: Optional[str] = None  # e.g. "run_result"
     usage: Optional[dict[str, Any]] = None  # optional token metadata
+    # Paths only (no base64) — e.g. images from generate_image.
+    attachments: list[ChatAttachment] = Field(default_factory=list)
 
 
 def message_counts_as_unread(

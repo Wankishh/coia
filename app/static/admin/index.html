@@ -43,6 +43,9 @@
           <button type="button" class="nav-item" data-view="sources">
             Data sources
           </button>
+          <button type="button" class="nav-item" data-view="files">
+            Files
+          </button>
           <button type="button" class="nav-item" data-view="executions">
             Executions
           </button>
@@ -169,6 +172,7 @@
         </section>
         <section id="view-activity" class="view"></section>
         <section id="view-sources" class="view"></section>
+        <section id="view-files" class="view"></section>
         <section id="view-executions" class="view"></section>
         <section id="view-system" class="view"></section>
       </main>
@@ -276,6 +280,20 @@
               ></ul>
             </div>
             <span class="hint" id="model-fetch-hint" hidden></span>
+          </label>
+          <label class="span-2" id="agent-image-model-wrap" hidden>
+            Image model
+            <input
+              name="image_model"
+              id="agent-image-model"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Leave blank for provider default"
+            />
+            <span class="hint" id="image-model-hint"
+              >Optional override for generate_image. Shown for openai / openrouter / google.</span
+            >
           </label>
           <label class="span-2" id="custom-model-wrap" hidden>
             Custom model id
@@ -451,7 +469,7 @@
         </button>
       </header>
       <div class="dialog-body report-frame-wrap">
-        <iframe id="report-frame" title="Execution HTML report" sandbox=""></iframe>
+        <iframe id="report-frame" title="Execution HTML report" sandbox="allow-same-origin"></iframe>
       </div>
     </dialog>
 
@@ -507,9 +525,37 @@
       </form>
     </dialog>
 
+    <dialog id="file-edit-dialog" class="dialog wide">
+      <form id="file-edit-form" method="dialog">
+        <header class="dialog-head">
+          <h2 id="file-edit-dialog-title">Edit file</h2>
+          <button type="button" class="icon-btn" id="file-edit-dialog-close" aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="dialog-body">
+          <label class="span-2">
+            <span id="file-edit-path" class="mono muted"></span>
+            <textarea
+              id="file-edit-textarea"
+              rows="18"
+              spellcheck="false"
+              class="file-edit-textarea"
+            ></textarea>
+          </label>
+        </div>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="file-edit-dialog-cancel" value="cancel">
+            Cancel
+          </button>
+          <button type="submit" class="primary-btn" value="confirm">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
     <script src="https://cdn.jsdelivr.net/npm/easymde@2.18.0/dist/easymde.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
-    <script src="/admin/app.js?v=20261004a" type="module"></script>
+    <script src="/admin/app.js?v=20261004c" type="module"></script>
   </body>
 </html>

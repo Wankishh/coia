@@ -281,7 +281,7 @@ INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES
 SELECT setval(pg_get_serial_sequence('order_items', 'id'), (SELECT MAX(id) FROM order_items));
 
 -- ---------------------------------------------------------------------------
--- sales_transactions (64) — denormalized fact table for Financial Analyst seed
+-- sales_transactions (64) — denormalized fact table for Finance Ops / sales analytics seed
 -- ---------------------------------------------------------------------------
 CREATE TABLE sales_transactions (
     id SERIAL PRIMARY KEY,

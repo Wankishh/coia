@@ -1,4 +1,4 @@
-"""SQL schema introspection for library data sources."""
+"""SQL / Mongo schema introspection for library data sources."""
 
 from __future__ import annotations
 
@@ -11,8 +11,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Connection
 
-from app.models.source import SqlSourceConfig
+from app.models.source import NosqlSourceConfig, SqlSourceConfig
 from app.services.db_tunnel import optional_ssh_tunnel
+from app.tools.mongo_readonly import list_mongo_collection_names
 from app.tools.sql_readonly import _DEFAULT_PORTS, _engine_args_for_url, normalize_sqlalchemy_url
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,21 @@ async def fetch_source_schema(source_id: str, cfg: SqlSourceConfig) -> SourceSch
     """Inspect tables/columns (and cheap row counts) via the source connection."""
     tables = await asyncio.to_thread(_inspect_sql_schema, cfg)
     return SourceSchema(source_id=source_id, engine=cfg.engine, tables=tables)
+
+
+async def fetch_mongo_schema(source_id: str, cfg: NosqlSourceConfig) -> SourceSchema:
+    """List MongoDB collection names (columns unknown without sampling)."""
+    conn = (cfg.connection_string or "").strip()
+    if not conn:
+        raise RuntimeError("MongoDB source has no connection_string")
+    if cfg.engine != "mongodb":
+        raise RuntimeError(f"Unsupported NoSQL engine: {cfg.engine}")
+
+    names = await asyncio.to_thread(
+        list_mongo_collection_names, conn, cfg.ssh
+    )
+    tables = [SchemaTable(name=n, columns=[]) for n in names]
+    return SourceSchema(source_id=source_id, engine="mongodb", tables=tables)
 
 
 def _inspect_sql_schema(cfg: SqlSourceConfig) -> list[SchemaTable]:

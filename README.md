@@ -125,6 +125,7 @@ Full console (agents CRUD, run, executions, chat HTML reports, health):
 | `POST` | `/chats/{id}/cancel` | Best-effort cancel of an in-flight chat stream |
 | `GET` | `/chats/{id}/messages/{index}/html` | HTML report body for iframe preview |
 | `POST` | `/chats/{id}/attachments` | Upload a file into the chat (`multipart`) |
+| `GET` | `/chats/{id}/attachments/{filename}` | Serve an attachment for preview (`FileResponse`) |
 | `POST` | `/chats/{id}/read` | Mark session read (`last_read_at`) |
 | `POST` | `/chats/{id}/handoff` | Send latest (or indexed) HTML report to handoff agent |
 | `GET` | `/usage?days=7` | Rough usage meter by agent/day |
@@ -135,13 +136,13 @@ Full console (agents CRUD, run, executions, chat HTML reports, health):
 | `POST` / `GET` / `PATCH` / `DELETE` | `/sources`, `/sources/{id}` | Data Sources library CRUD (secrets redacted on GET) |
 | `POST` | `/sources/test` | Probe unsaved config `{ ok, message, latency_ms? }` (SQL `SELECT 1` / Mongo `ping` / files folder) |
 | `POST` | `/sources/{id}/test` | Probe saved source (optional body overrides; secrets merge from storage) |
-| `GET` / `POST` | `/sources/{id}/files` | List / upload files for a `files` library source |
-| `GET` / `PUT` / `DELETE` | `/sources/{id}/files/{path}` | Read / update text / delete a library source file |
-| `GET` | `/admin/` | Admin console (agents, chat, activity, sources, executions, system) |
+| `GET` / `POST` | `/sources/{id}/files` | List / upload files for a `files` library source (`?path=` for cwd; mkdir via `POST .../files/mkdir`) |
+| `GET` / `PUT` / `DELETE` | `/sources/{id}/files/{path}` | Read / update text / delete a library source file or folder (dirs deleted recursively) |
+| `GET` | `/admin/` | Admin console (agents, chat, activity, sources, files, executions, system) |
 
 **Concurrency:** if an agent already has `status=running`, a **manual** run returns **409**; a **cron** trigger skips and logs.
 
-**Chat:** From **Agents** in the admin console, use **Chat** on a row or in the detail pane. Conversations are stored separately from runs (no `ExecutionLog`, so chat does not contend with the single-running claim). The admin UI streams via `POST /chats/{id}/messages/stream` (SSE); the sync `POST /chats/{id}/messages` endpoint remains available. Default timeout `CHAT_TIMEOUT_SECONDS=120`. Cancel with the composer **Cancel** button (`AbortController` + `POST /chats/{id}/cancel`). After `done`, the UI always `GET /chats/{id}` and renders HTML report cards from `message.html` (iframe via `/chats/{id}/messages/{index}/html`). Paperclip uploads go to `POST /chats/{id}/attachments`.
+**Chat:** From **Agents** in the admin console, use **Chat** on a row or in the detail pane. Conversations are stored separately from runs (no `ExecutionLog`, so chat does not contend with the single-running claim). The admin UI streams via `POST /chats/{id}/messages/stream` (SSE); the sync `POST /chats/{id}/messages` endpoint remains available. Default timeout `CHAT_TIMEOUT_SECONDS=120`. Cancel with the composer **Cancel** button (`AbortController` + `POST /chats/{id}/cancel`). After `done`, the UI always `GET /chats/{id}` and renders HTML report cards from `message.html` (iframe via `/chats/{id}/messages/{index}/html`) and image previews from message/session attachments (`GET /chats/{id}/attachments/{filename}`). Paperclip uploads go to `POST /chats/{id}/attachments`. Agents with an image backend (openai / openrouter / google) can call `generate_image` (PNG under `_generated/` + chat attachment shown in the message bubble and attachment bar).
 
 **Reports:** HTML reports are chat/session-only (cards + Expand in Chat; Open HTML on Executions). Legacy `/admin/reports` redirects to Chat; there is no top-level Reports gallery or `GET /reports`.
 
@@ -155,7 +156,7 @@ No auth in this MVP.
 
 ## Agent config fields
 
-**Write (create / patch):** `name` (display / persona name, e.g. Josh), `role`, `system_prompt`, `provider` (`openai` \| `anthropic` \| `google` \| `openrouter` \| `ollama`), `model_name`, `api_key` (required on create for cloud providers; optional/empty for `ollama`; optional on patch — omit to keep), `base_url?` (optional OpenAI-compatible endpoint; meaningful for `ollama`), `enabled_tools[]` (optional; admin UI sends `[]`), `cron_schedule?`, `default_prompt?`, `source_ids[]` (ordered library attachments), `handoff_agent_id?` (optional peer agent for HTML report handoff). Legacy `sources[]` (embedded full configs) is still accepted briefly when `source_ids` is empty.
+**Write (create / patch):** `name` (display / persona name, e.g. Josh), `role`, `system_prompt`, `provider` (`openai` \| `anthropic` \| `google` \| `openrouter` \| `ollama`), `model_name`, `api_key` (required on create for cloud providers; optional/empty for `ollama`; optional on patch — omit to keep), `base_url?` (optional OpenAI-compatible endpoint; meaningful for `ollama`), `image_model?` (optional override for `generate_image`; defaults per provider when omitted), `enabled_tools[]` (optional; admin UI sends `[]`), `cron_schedule?`, `default_prompt?`, `source_ids[]` (ordered library attachments), `handoff_agent_id?` (optional peer agent for HTML report handoff). Legacy `sources[]` (embedded full configs) is still accepted briefly when `source_ids` is empty.
 
 **Prompt placeholders:** before chat/run LLM calls, `{{name}}` / `{{agent_name}}`, `{{role}}`, `{{provider}}`, `{{model}}` / `{{model_name}}` in `system_prompt` and user/default prompts are replaced from the agent config.
 
@@ -182,14 +183,15 @@ Sources are **first-class library documents** in Mongo (`data_sources`), managed
 |-------|--------|
 | `id` | UUID (auto if omitted) |
 | `title` / `description` | Markdown OK — explain what the source is and what the agent can do with it |
-| `type` | `sql` \| `nosql` \| `files` |
+| `type` | `sql` \| `nosql` \| `files` \| `rest` |
 | `config` | Type-specific object (same shapes as before) |
 | `created_at` / `updated_at` | Library metadata |
 
 - **sql** — `{ engine: postgresql\|mysql\|sqlite, connection_string?, ssh? }`. Runtime resolves attached SQL sources into read-only `run_sql_query` tools (first → `run_sql_query`; additional get suffixed names). If no SQL source is attached, the tool falls back to `DEMO_DATABASE_URL`.
-- **nosql** — `{ engine: mongodb, connection_string?, ssh? }`. Persisted + editable; **query tool execution is deferred**.
-- **files** — `{ path_prefix? }`. Files live under `data/agent_workspaces/_library/{source_id}/` (shared). Sandbox tools mount attached file sources at `sources/{source_id}/` for the agent. Upload / list / edit / delete via `/sources/{id}/files`.
-- **ssh** (sql/nosql) — `{ enabled, host, port, username, auth: password\|key, password?, private_key?, remote_host?, remote_port? }`. Credentials stored plaintext for MVP. When `enabled`, the SQL tool opens an `sshtunnel` per query.
+- **nosql** — `{ engine: mongodb, connection_string?, ssh? }`. Attached Mongo sources expose read-only `mongo_list_collections` / `mongo_find` / `mongo_aggregate` (multi-source naming mirrors SQL). Writes, `$out` / `$merge`, and `$where` are rejected; results are capped.
+- **files** — `{ path_prefix? }`. Files live under `data/agent_workspaces/_library/{source_id}/` (shared). Sandbox tools mount attached file sources at `sources/{source_id}/` for the agent. Upload / list / edit / delete via `/sources/{id}/files`. CSV/TSV/XLSX also register as DuckDB tables for `run_file_sql` (prefixed names to avoid collisions).
+- **rest** — `{ base_url, auth: none\|bearer\|header, bearer_token?, header_name?, header_value?, allowed_path_prefixes[], timeout_seconds? }`. Exposes GET-only `http_get` (path + query params). SSRF guards: same host as `base_url`, path allowlist, timeout, response size cap, careful redirects. Secrets redacted in public APIs like other sources.
+- **ssh** (sql/nosql) — `{ enabled, host, port, username, auth: password\|key, password?, private_key?, remote_host?, remote_port? }`. Credentials stored plaintext for MVP. When `enabled`, SQL/Mongo tools open an `sshtunnel` per query.
 
 **Migration / compat:** Older agents may still have embedded `sources[]`. On read/run, the harness prefers `source_ids` (library lookup); if `source_ids` is empty it falls back to embedded blobs. New admin UI writes `source_ids` only.
 
@@ -199,7 +201,20 @@ Admin: markdown editors for agent prompts and source descriptions; agent form us
 
 - `sandbox_file` / `read_file` / `write_file` / `list_files` — agent workspace under `./data/agent_workspaces/{agent_id}/`, plus attached library file sources under `sources/{source_id}/`
 - `sql` / `run_sql_query` — read-only SQL (`SELECT` / `WITH` / `SHOW` / `EXPLAIN`) against attached SQL library sources or `DEMO_DATABASE_URL`
+- `mongo_*` — read-only MongoDB tools for attached `nosql` sources (`mongo_list_collections`, `mongo_find`, `mongo_aggregate`; additional sources get a title slug suffix)
+- `run_file_sql` — DuckDB SQL over CSV/TSV/XLSX in attached `files` mounts (no `INSTALL`/`LOAD`/remote `ATTACH`)
+- `http_get` — GET-only REST calls for attached `rest` sources (allowlisted paths under `base_url`)
 - `write_html_report` — preferred path for HTML; also extracted from the final answer as fallback
+- `generate_image` — capability-based image backends (not OpenAI-only):
+  | Provider | Image gen | Default `image_model` | Notes |
+  |---|---|---|---|
+  | `openai` | yes | `gpt-image-1` (falls back to `dall-e-3`) | OpenAI Images API |
+  | `openrouter` | yes | `google/gemini-2.5-flash-image` | Dedicated `POST /api/v1/images`; set `image_model` for Flux / GPT-Image / etc. |
+  | `google` | yes | `gemini-2.5-flash-image` | Gemini `generateContent` with image modality (REST) |
+  | `anthropic` | no | — | Clear tool error |
+  | `ollama` | no | — | Clear tool error |
+
+  Writes PNG to `_generated/` and registers a chat attachment for in-bubble + attachment-bar preview. Optional agent field `image_model` overrides the default.
 
 If `enabled_tools` is empty, all tools are enabled.
 
@@ -217,7 +232,7 @@ app/
   models/           # AgentConfig, DataSource, Conversation, ExecutionLog
   api/              # agents, chats, sources, executions, health
   services/         # repos, LLMFactory, AgentRunner, ChatService, source resolve/files
-  tools/            # sandbox file, SQL, write_html_report
+  tools/            # sandbox file, SQL, Mongo, file SQL, REST GET, write_html_report
   scheduler.py      # APScheduler AsyncIOScheduler
 scripts/seed_demo.py
 scripts/load_demo_db.py   # re-apply demo schema/data to DEMO_DATABASE_URL
@@ -246,5 +261,5 @@ uvicorn app.main:app --reload --port 8000
 - HTML charting is plain HTML/CSS (no JS chart library bundled)
 - Single-process deployment only (see uvicorn workers note above); concurrent runs are claimed via a Mongo partial unique index on `agent_id` where `status=running`
 - Agents created before the `api_key` migration (`api_key_env_var`) must be re-created or patched with `api_key`
-- NoSQL (Mongo) source **runtime query tool** not wired yet (config + UI only)
-- SSH tunnels for SQL are best-effort per query via `sshtunnel`; prefer direct connections for the demo path
+- REST sources are GET-first (no POST/PUT/PATCH/DELETE tools yet)
+- SSH tunnels for SQL/Mongo are best-effort per query via `sshtunnel`; prefer direct connections for the demo path

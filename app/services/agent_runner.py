@@ -147,7 +147,8 @@ class AgentRunner:
             system_text = interpolate_prompt(agent.system_prompt, agent)
             try:
                 schema_block = await build_attached_sources_schema_block(
-                    resolved_sources
+                    resolved_sources,
+                    workspace_root=self._settings.workspace_path,
                 )
                 system_text = append_schema_to_system_prompt(
                     system_text, schema_block

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mimetypes
 import re
 import shutil
 from pathlib import Path
@@ -10,6 +11,7 @@ from app.models.conversation import ChatAttachment
 from app.tools.sandbox_file import SandboxPathError, resolve_sandbox_path
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"})
 
 
 class ChatAttachmentError(ValueError):
@@ -39,6 +41,62 @@ def safe_filename(name: str) -> str:
     base = Path(name or "upload.bin").name
     cleaned = _SAFE_NAME.sub("_", base).strip("._") or "upload.bin"
     return cleaned[:180]
+
+
+def is_image_attachment(
+    *,
+    name: str | None = None,
+    content_type: str | None = None,
+) -> bool:
+    """True when content_type or filename looks like a previewable image."""
+    ct = (content_type or "").lower().strip()
+    if ct.startswith("image/"):
+        return True
+    suffix = Path(name or "").suffix.lower()
+    return suffix in _IMAGE_SUFFIXES
+
+
+def resolve_chat_attachment_file(
+    workspace_root: Path,
+    chat_id: str,
+    filename: str,
+) -> Path:
+    """
+    Resolve a single attachment file under `_chats/{chat_id}/`.
+
+    Rejects path traversal; does not create the chat directory.
+    """
+    if not chat_id or ".." in chat_id or "/" in chat_id or "\\" in chat_id:
+        raise ChatAttachmentError("Invalid chat id")
+    raw = filename or ""
+    if not raw or raw in (".", "..") or "/" in raw or "\\" in raw or ".." in raw:
+        raise ChatAttachmentError("Invalid attachment filename")
+    name = safe_filename(raw)
+    if not name:
+        raise ChatAttachmentError("Invalid attachment filename")
+    root = chats_root(workspace_root)
+    directory = (root / chat_id).resolve()
+    try:
+        directory.relative_to(root)
+    except ValueError as exc:
+        raise ChatAttachmentError("Invalid chat id") from exc
+    if not directory.is_dir():
+        raise ChatAttachmentError("Chat attachments not found")
+    target = (directory / name).resolve()
+    try:
+        target.relative_to(directory)
+    except ValueError as exc:
+        raise ChatAttachmentError("Invalid attachment filename") from exc
+    if not target.is_file():
+        raise ChatAttachmentError("Attachment file not found")
+    return target
+
+
+def guess_content_type(path: Path, content_type: str | None = None) -> str:
+    if content_type:
+        return content_type
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed or "application/octet-stream"
 
 
 def save_upload(

@@ -14,6 +14,7 @@ class SourceType(str, Enum):
     sql = "sql"
     nosql = "nosql"
     files = "files"
+    rest = "rest"
 
 
 class SshAuth(str, Enum):
@@ -49,7 +50,27 @@ class FilesSourceConfig(BaseModel):
     path_prefix: Optional[str] = None
 
 
-SourceConfigPayload = Union[SqlSourceConfig, NosqlSourceConfig, FilesSourceConfig]
+class RestAuthType(str, Enum):
+    none = "none"
+    bearer = "bearer"
+    header = "header"
+
+
+class RestSourceConfig(BaseModel):
+    """GET-first HTTP API source."""
+
+    base_url: str = ""
+    auth: RestAuthType = RestAuthType.none
+    bearer_token: Optional[str] = None
+    header_name: Optional[str] = None
+    header_value: Optional[str] = None
+    allowed_path_prefixes: list[str] = Field(default_factory=list)
+    timeout_seconds: float = 15.0
+
+
+SourceConfigPayload = Union[
+    SqlSourceConfig, NosqlSourceConfig, FilesSourceConfig, RestSourceConfig
+]
 
 
 def _utcnow() -> datetime:
@@ -83,6 +104,8 @@ class SourceConfig(BaseModel):
             return SqlSourceConfig.model_validate(self.config)
         if self.type == SourceType.nosql:
             return NosqlSourceConfig.model_validate(self.config)
+        if self.type == SourceType.rest:
+            return RestSourceConfig.model_validate(self.config)
         return FilesSourceConfig.model_validate(self.config)
 
 
@@ -189,6 +212,8 @@ def _normalize_config(source_type: SourceType, config: dict[str, Any]) -> dict[s
         return SqlSourceConfig.model_validate(raw).model_dump(mode="json")
     if source_type == SourceType.nosql:
         return NosqlSourceConfig.model_validate(raw).model_dump(mode="json")
+    if source_type == SourceType.rest:
+        return RestSourceConfig.model_validate(raw).model_dump(mode="json")
     return FilesSourceConfig.model_validate(raw).model_dump(mode="json")
 
 
@@ -221,6 +246,20 @@ def to_public_source(
             "engine": engine,
             "connection_string_set": bool(conn),
             "ssh": _ssh_public(source.config.get("ssh")),
+        }
+    elif source.type == SourceType.rest:
+        bearer = (source.config.get("bearer_token") or "").strip()
+        header_value = (source.config.get("header_value") or "").strip()
+        public_config = {
+            "base_url": source.config.get("base_url") or "",
+            "auth": source.config.get("auth") or RestAuthType.none.value,
+            "bearer_token_set": bool(bearer),
+            "header_name": source.config.get("header_name") or None,
+            "header_value_set": bool(header_value),
+            "allowed_path_prefixes": list(
+                source.config.get("allowed_path_prefixes") or []
+            ),
+            "timeout_seconds": source.config.get("timeout_seconds") or 15.0,
         }
     else:
         public_config = {
@@ -274,6 +313,15 @@ def merge_source_secrets(
             ).strip():
                 ssh["private_key"] = old_ssh["private_key"]
             merged_config["ssh"] = ssh
+    elif incoming.type == SourceType.rest:
+        new_bearer = (merged_config.get("bearer_token") or "").strip()
+        old_bearer = (existing.config.get("bearer_token") or "").strip()
+        if not new_bearer and old_bearer:
+            merged_config["bearer_token"] = old_bearer
+        new_header = (merged_config.get("header_value") or "").strip()
+        old_header = (existing.config.get("header_value") or "").strip()
+        if not new_header and old_header:
+            merged_config["header_value"] = old_header
 
     return SourceConfig(
         id=incoming.id,

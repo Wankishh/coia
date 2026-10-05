@@ -10,9 +10,20 @@ from langchain_core.tools import BaseTool
 
 from app.config import Settings
 from app.models.agent import AgentConfig
-from app.models.source import SourceConfig, SourceType, SqlSourceConfig
+from app.models.conversation import ChatAttachment
+from app.models.source import (
+    NosqlSourceConfig,
+    RestSourceConfig,
+    SourceConfig,
+    SourceType,
+    SqlSourceConfig,
+)
 from app.services.source_files import library_source_root
+from app.tools.file_sql import create_file_sql_tool
+from app.tools.generate_image import create_generate_image_tool
 from app.tools.html_report import create_write_html_report_tool
+from app.tools.mongo_readonly import create_mongo_tools_from_source
+from app.tools.rest_get import create_http_get_tool
 from app.tools.sandbox_file import create_sandbox_tools
 from app.tools.sql_readonly import create_sql_tool, create_sql_tool_from_source
 
@@ -78,12 +89,19 @@ def build_tools_for_agent(
     *,
     sources: Optional[list[SourceConfig]] = None,
     on_html: Optional[Callable[[str], None]] = None,
+    on_image: Optional[Callable[[ChatAttachment], None]] = None,
+    chat_id: Optional[str] = None,
 ) -> list[BaseTool]:
     """
     Build tools for an agent.
 
     ``sources`` should be the resolved library (or legacy embedded) sources.
     When omitted, falls back to ``agent.sources`` (legacy only).
+
+    ``generate_image`` is included for all agents (default toolset). OpenAI,
+    OpenRouter, and Google have image backends; Anthropic/Ollama return a clear
+    error. Pass ``chat_id`` + ``on_image`` so generated PNGs become chat
+    attachments for UI preview.
     """
     resolved = list(sources) if sources is not None else list(agent.sources)
 
@@ -91,10 +109,12 @@ def build_tools_for_agent(
     workspace.mkdir(parents=True, exist_ok=True)
 
     library_mounts: dict = {}
+    files_titles: dict[str, str] = {}
     for source in resolved:
         if source.type == SourceType.files:
             lib_root = library_source_root(settings.workspace_path, source.id)
             library_mounts[f"sources/{source.id}"] = lib_root
+            files_titles[source.id] = source.title
 
     enabled = {t.strip() for t in agent.enabled_tools if t and t.strip()}
     tools: list[BaseTool] = []
@@ -105,7 +125,13 @@ def build_tools_for_agent(
     ) or not enabled
     # If enabled_tools is empty, default to all tools for MVP convenience
     want_sql = bool(enabled & {"sql", "run_sql_query"}) or not enabled
+    want_mongo = bool(
+        enabled & {"mongo", "mongo_find", "mongo_aggregate", "mongo_list_collections"}
+    ) or not enabled
+    want_file_sql = bool(enabled & {"file_sql", "run_file_sql"}) or not enabled
+    want_rest = bool(enabled & {"rest", "http_get"}) or not enabled
     want_html = "write_html_report" in enabled or not enabled
+    want_image = "generate_image" in enabled or not enabled
 
     if want_sandbox:
         tools.extend(
@@ -159,7 +185,82 @@ def build_tools_for_agent(
                 )
             )
 
+    if want_mongo:
+        mongo_sources = [s for s in resolved if s.type == SourceType.nosql]
+        for index, source in enumerate(mongo_sources):
+            try:
+                nosql_cfg = NosqlSourceConfig.model_validate(source.config)
+                if nosql_cfg.engine != "mongodb":
+                    continue
+                name_prefix = "mongo" if index == 0 else f"mongo_{_slug(source.title)}"
+                tools.extend(
+                    create_mongo_tools_from_source(
+                        nosql_cfg,
+                        title=source.title,
+                        description=source.description or "",
+                        name_prefix=name_prefix,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Skipping Mongo source %s for agent %s: %s",
+                    source.id,
+                    agent.id,
+                    exc,
+                )
+
+    if want_file_sql and library_mounts:
+        try:
+            file_tool = create_file_sql_tool(
+                library_mounts,
+                source_titles=files_titles,
+            )
+            if file_tool is not None:
+                tools.append(file_tool)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Skipping file SQL tool for agent %s: %s", agent.id, exc
+            )
+
+    if want_rest:
+        rest_sources = [s for s in resolved if s.type == SourceType.rest]
+        for index, source in enumerate(rest_sources):
+            try:
+                rest_cfg = RestSourceConfig.model_validate(source.config)
+                tool_name = (
+                    "http_get" if index == 0 else f"http_get_{_slug(source.title)}"
+                )
+                tools.append(
+                    create_http_get_tool(
+                        rest_cfg,
+                        title=source.title,
+                        description=source.description or "",
+                        name=tool_name,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Skipping REST source %s for agent %s: %s",
+                    source.id,
+                    agent.id,
+                    exc,
+                )
+
     if want_html:
         tools.append(create_write_html_report_tool(workspace, on_html=on_html))
+
+    if want_image:
+        tools.append(
+            create_generate_image_tool(
+                workspace,
+                provider=agent.provider,
+                api_key=agent.api_key or "",
+                base_url=agent.base_url,
+                image_model=agent.image_model,
+                workspace_root=settings.workspace_path,
+                chat_id=chat_id,
+                on_image=on_image,
+            )
+        )
 
     return tools

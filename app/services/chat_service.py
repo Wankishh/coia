@@ -72,7 +72,6 @@ class ChatSummaryUpdate:
     through_count: int
 
 
-
 class ChatService:
     """Run a single chat turn against an agent using conversation history."""
 
@@ -230,10 +229,12 @@ class ChatService:
                 assistant_text,
                 tool_calls,
                 html,
+                images,
                 summary_update,
             ) = await self._run_agent_turn(
                 agent,
                 conversation,
+                chat_id=chat_id,
             )
         except ChatServiceError:
             raise
@@ -242,7 +243,11 @@ class ChatService:
             raise ChatServiceError(str(exc) or "Chat turn failed") from exc
 
         updated = await self._persist_assistant(
-            chat_id, assistant_text, tool_calls, html=html
+            chat_id,
+            assistant_text,
+            tool_calls,
+            html=html,
+            attachments=images,
         )
         if summary_update is not None:
             await self._conversations.set_rolling_summary(
@@ -306,10 +311,14 @@ class ChatService:
         assistant_text = ""
         tool_calls: list[dict[str, Any]] = []
         captured_html: dict[str, Optional[str]] = {"html": None}
+        captured_images: list[ChatAttachment] = []
         cancelled = False
 
         def on_html(html: str) -> None:
             captured_html["html"] = html
+
+        def on_image(attachment: ChatAttachment) -> None:
+            captured_images.append(attachment)
 
         try:
             async for event in self._stream_agent_turn(
@@ -317,6 +326,8 @@ class ChatService:
                 history,
                 memory=memory,
                 on_html=on_html,
+                on_image=on_image,
+                chat_id=chat_id,
             ):
                 if self._activity and self._activity.is_chat_cancelled(chat_id):
                     cancelled = True
@@ -363,6 +374,7 @@ class ChatService:
                         assistant_text + "\n\n_(Cancelled.)_",
                         tool_calls,
                         html=html,
+                        attachments=captured_images,
                     )
                 except ChatServiceError as exc:
                     yield {"event": "error", "data": {"message": str(exc)}}
@@ -378,7 +390,11 @@ class ChatService:
 
         try:
             await self._persist_assistant(
-                chat_id, assistant_text, tool_calls, html=html
+                chat_id,
+                assistant_text,
+                tool_calls,
+                html=html,
+                attachments=captured_images,
             )
             if summary_update is not None:
                 await self._conversations.set_rolling_summary(
@@ -458,16 +474,27 @@ class ChatService:
         tool_calls: list[dict[str, Any]],
         *,
         html: Optional[str] = None,
+        attachments: Optional[list[ChatAttachment]] = None,
     ) -> Conversation:
+        image_atts = list(attachments or [])
         assistant_msg = ChatMessage(
             role=ChatRole.assistant,
             content=assistant_text,
             tool_calls=tool_calls or None,
             html=html,
+            attachments=image_atts,
         )
         updated = await self._conversations.append_messages(chat_id, [assistant_msg])
         if updated is None:
             raise ChatServiceError("Chat not found after reply")
+        # Also surface on the session attachment bar (paths only, no bytes).
+        for att in image_atts:
+            try:
+                pushed = await self._conversations.add_attachment(chat_id, att)
+                if pushed is not None:
+                    updated = pushed
+            except Exception:  # noqa: BLE001
+                logger.debug("Session attachment push skipped", exc_info=True)
         return updated
 
     async def _resolved_sources(self, agent):
@@ -479,7 +506,10 @@ class ChatService:
         prompt = interpolate_prompt(agent.system_prompt, agent)
         try:
             sources = await self._resolved_sources(agent)
-            schema_block = await build_attached_sources_schema_block(sources)
+            schema_block = await build_attached_sources_schema_block(
+                sources,
+                workspace_root=self._settings.workspace_path,
+            )
             prompt = append_schema_to_system_prompt(prompt, schema_block)
         except Exception:  # noqa: BLE001
             logger.debug("Schema context skipped", exc_info=True)
@@ -489,7 +519,14 @@ class ChatService:
         )
         return SystemMessage(content=prompt)
 
-    async def _build_graph(self, agent, *, on_html=None):
+    async def _build_graph(
+        self,
+        agent,
+        *,
+        on_html=None,
+        on_image=None,
+        chat_id: Optional[str] = None,
+    ):
         try:
             llm = LLMFactory.create(agent)
         except LLMFactoryError as exc:
@@ -501,6 +538,8 @@ class ChatService:
             self._settings,
             sources=resolved_sources,
             on_html=on_html,
+            on_image=on_image,
+            chat_id=chat_id,
         )
         return create_react_agent(llm, tools)
 
@@ -508,18 +547,30 @@ class ChatService:
         self,
         agent,
         conversation: Conversation,
+        *,
+        chat_id: Optional[str] = None,
     ) -> tuple[
         str,
         list[dict[str, Any]],
         Optional[str],
+        list[ChatAttachment],
         Optional[ChatSummaryUpdate],
     ]:
         captured_html: dict[str, Optional[str]] = {"html": None}
+        captured_images: list[ChatAttachment] = []
 
         def on_html(html: str) -> None:
             captured_html["html"] = html
 
-        graph = await self._build_graph(agent, on_html=on_html)
+        def on_image(attachment: ChatAttachment) -> None:
+            captured_images.append(attachment)
+
+        graph = await self._build_graph(
+            agent,
+            on_html=on_html,
+            on_image=on_image,
+            chat_id=chat_id,
+        )
         history, summary_update = prepare_chat_memory(
             conversation,
             agent,
@@ -579,7 +630,7 @@ class ChatService:
         if not assistant_text.strip():
             assistant_text = "(No text reply from agent.)"
         html = captured_html["html"] or extract_html_from_text(assistant_text)
-        return assistant_text, tool_calls, html, summary_update
+        return assistant_text, tool_calls, html, captured_images, summary_update
 
     async def _stream_agent_turn(
         self,
@@ -588,8 +639,15 @@ class ChatService:
         *,
         memory: str = "",
         on_html=None,
+        on_image=None,
+        chat_id: Optional[str] = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        graph = await self._build_graph(agent, on_html=on_html)
+        graph = await self._build_graph(
+            agent,
+            on_html=on_html,
+            on_image=on_image,
+            chat_id=chat_id,
+        )
         messages: list[Any] = [await self._system_message(agent)]
         if memory:
             messages.append(_memory_message(memory))

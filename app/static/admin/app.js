@@ -71,6 +71,11 @@ const state = {
   agentTemplates: [],
   selectedAgentId: null,
   selectedSourceId: null,
+  selectedFilesSourceId: null,
+  filesCwd: "",
+  filesEntries: null,
+  filesLoading: false,
+  filesViewMode: "list",
   logs: [],
   selectedExecutionId: null,
   selectedExecution: null,
@@ -80,6 +85,7 @@ const state = {
   runAgentId: null,
   pollTimer: null,
   activityPollTimer: null,
+  chatPollTimer: null,
   activityItems: [],
   activityCount: 0,
   attachFilter: "",
@@ -93,6 +99,7 @@ const state = {
   chatStreamingText: "",
   chatStreamStarted: false,
   chatStreamGeneratingHtml: false,
+  chatStreamGeneratingImage: false,
   chatStreamTools: [],
   allSessions: [],
   /** "all" | "agent" — sidebar agent-scope filter. */
@@ -427,6 +434,273 @@ function promptRenameDialog(currentTitle = "") {
   });
 }
 
+function promptFileEditDialog(path, content = "") {
+  return new Promise((resolve) => {
+    const dialog = $("#file-edit-dialog");
+    const form = $("#file-edit-form");
+    const textarea = $("#file-edit-textarea");
+    const pathEl = $("#file-edit-path");
+    const titleEl = $("#file-edit-dialog-title");
+    if (!dialog || !form || !textarea) {
+      resolve(window.prompt(`Edit ${path}`, content));
+      return;
+    }
+    if (titleEl) titleEl.textContent = "Edit file";
+    if (pathEl) pathEl.textContent = path;
+    textarea.value = content ?? "";
+    const onClose = () => {
+      dialog.removeEventListener("close", onClose);
+      if (dialog.returnValue === "confirm") {
+        resolve(textarea.value);
+      } else {
+        resolve(null);
+      }
+    };
+    dialog.addEventListener("close", onClose);
+    dialog.returnValue = "";
+    dialog.showModal();
+    requestAnimationFrame(() => {
+      textarea.focus();
+    });
+  });
+}
+
+function joinExplorerPath(cwd, name) {
+  const base = (cwd || "").replace(/^\/+|\/+$/g, "");
+  const leaf = (name || "").replace(/^\/+/, "");
+  if (!base) return leaf;
+  if (!leaf) return base;
+  return `${base}/${leaf}`;
+}
+
+function explorerParentPath(cwd) {
+  const parts = (cwd || "").split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
+}
+
+function formatBytes(size) {
+  const n = Number(size);
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderFileExplorerBreadcrumbs(cwd) {
+  const parts = (cwd || "").split("/").filter(Boolean);
+  const crumbs = [{ label: "Root", path: "" }];
+  let acc = "";
+  for (const part of parts) {
+    acc = acc ? `${acc}/${part}` : part;
+    crumbs.push({ label: part, path: acc });
+  }
+  return crumbs
+    .map((c, i) => {
+      const last = i === crumbs.length - 1;
+      if (last) {
+        return `<span class="file-explorer-crumb is-current">${escapeHtml(c.label)}</span>`;
+      }
+      return `<button type="button" class="file-explorer-crumb" data-fe-act="crumb" data-path="${escapeHtml(c.path)}">${escapeHtml(c.label)}</button>`;
+    })
+    .join(`<span class="file-explorer-crumb-sep" aria-hidden="true">/</span>`);
+}
+
+function renderFileExplorerHtml({
+  cwd = "",
+  entries = null,
+  loading = false,
+  label = "Files",
+  dropHint = "Drop files here or click to upload into this folder",
+  viewMode = "list",
+  showViewToggle = true,
+} = {}) {
+  const mode = viewMode === "grid" ? "grid" : "list";
+  let rows;
+  if (loading || entries == null) {
+    rows = `<li class="muted file-explorer-empty">${loading ? "Loading…" : "—"}</li>`;
+  } else if (!entries.length) {
+    rows = `<li class="muted file-explorer-empty">This folder is empty</li>`;
+  } else {
+    rows = entries
+      .map((entry) => {
+        const isDir = entry.type === "dir";
+        const kind = isDir ? "dir" : "file";
+        const sizeLabel = isDir ? "—" : formatBytes(entry.size) || "—";
+        const mtimeLabel = entry.mtime ? fmtTime(entry.mtime) : "—";
+        const createdLabel = entry.created ? fmtTime(entry.created) : "—";
+        const openAct = isDir
+          ? `<button type="button" class="file-explorer-name" data-fe-act="enter" data-path="${escapeHtml(entry.path)}">
+              <span class="file-explorer-kind" data-kind="${kind}">${kind}</span>
+              <span class="mono">${escapeHtml(entry.name)}</span>
+            </button>`
+          : `<span class="file-explorer-name">
+              <span class="file-explorer-kind" data-kind="${kind}">${kind}</span>
+              <span class="mono">${escapeHtml(entry.name)}</span>
+            </span>`;
+        const actions = isDir
+          ? `<button type="button" class="ghost-btn" data-fe-act="delete" data-path="${escapeHtml(entry.path)}" data-type="dir">Delete</button>`
+          : `${
+              entry.is_text
+                ? `<button type="button" class="ghost-btn" data-fe-act="edit" data-path="${escapeHtml(entry.path)}">Edit</button>`
+                : ""
+            }
+            <button type="button" class="ghost-btn" data-fe-act="download" data-path="${escapeHtml(entry.path)}">Download</button>
+            <button type="button" class="ghost-btn" data-fe-act="delete" data-path="${escapeHtml(entry.path)}" data-type="file">Delete</button>`;
+        return `
+          <li class="file-explorer-row source-file-row" data-type="${isDir ? "dir" : "file"}">
+            ${openAct}
+            <span class="file-explorer-col size">${escapeHtml(sizeLabel)}</span>
+            <span class="file-explorer-col" title="Modified">${escapeHtml(mtimeLabel)}</span>
+            <span class="file-explorer-col" title="Created">${escapeHtml(createdLabel)}</span>
+            <span class="row-actions">${actions}</span>
+          </li>`;
+      })
+      .join("");
+  }
+
+  const viewToggle = showViewToggle
+    ? `<div class="file-explorer-view-toggle" role="group" aria-label="View mode">
+        <button type="button" class="ghost-btn ${mode === "list" ? "is-active" : ""}" data-fe-act="view" data-mode="list">List</button>
+        <button type="button" class="ghost-btn ${mode === "grid" ? "is-active" : ""}" data-fe-act="view" data-mode="grid">Grid</button>
+      </div>`
+    : "";
+
+  return `
+    <div class="file-explorer" data-file-explorer data-view-mode="${mode}">
+      <div class="sources-head">
+        <span class="field-label">${escapeHtml(label)}</span>
+        <div class="row-actions">
+          ${viewToggle}
+          <button type="button" class="ghost-btn" data-fe-act="mkdir">New folder</button>
+          <button type="button" class="ghost-btn" data-fe-act="refresh">Refresh</button>
+        </div>
+      </div>
+      <nav class="file-explorer-breadcrumbs" aria-label="Current folder">
+        ${renderFileExplorerBreadcrumbs(cwd)}
+      </nav>
+      <label class="source-file-dropzone" data-fe-dropzone>
+        <span class="source-file-dropzone-label">${escapeHtml(dropHint)}</span>
+        <span class="source-file-dropzone-hint muted">Uploads go into the current folder</span>
+        <input type="file" data-fe-act="upload" multiple hidden />
+      </label>
+      <ul class="source-file-list file-explorer-list ${mode === "grid" ? "is-grid" : ""}">${rows}</ul>
+    </div>`;
+}
+
+function bindFileExplorer(rootEl, handlers) {
+  if (!rootEl) return;
+  const {
+    onRefresh,
+    onMkdir,
+    onUpload,
+    onEnter,
+    onCrumb,
+    onEdit,
+    onDownload,
+    onDelete,
+    onViewMode,
+  } = handlers;
+
+  rootEl.querySelector('[data-fe-act="refresh"]')?.addEventListener("click", () => {
+    onRefresh?.();
+  });
+  rootEl.querySelector('[data-fe-act="mkdir"]')?.addEventListener("click", () => {
+    onMkdir?.();
+  });
+  rootEl.querySelectorAll('[data-fe-act="view"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.mode === "grid" ? "grid" : "list";
+      onViewMode?.(mode);
+    });
+  });
+  const uploadInput = rootEl.querySelector('[data-fe-act="upload"]');
+  const dropzone = rootEl.querySelector("[data-fe-dropzone]");
+  uploadInput?.addEventListener("change", async (event) => {
+    const files = [...(event.target.files || [])];
+    if (!files.length) return;
+    await onUpload?.(files);
+    event.target.value = "";
+  });
+  if (dropzone) {
+    let dragDepth = 0;
+    dropzone.addEventListener("dragenter", (event) => {
+      event.preventDefault();
+      dragDepth += 1;
+      dropzone.classList.add("is-dragover");
+    });
+    dropzone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    });
+    dropzone.addEventListener("dragleave", (event) => {
+      event.preventDefault();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) dropzone.classList.remove("is-dragover");
+    });
+    dropzone.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      dragDepth = 0;
+      dropzone.classList.remove("is-dragover");
+      const files = [...(event.dataTransfer?.files || [])];
+      if (!files.length) return;
+      await onUpload?.(files);
+      if (uploadInput) uploadInput.value = "";
+    });
+  }
+
+  rootEl.querySelectorAll('[data-fe-act="crumb"]').forEach((btn) => {
+    btn.addEventListener("click", () => onCrumb?.(btn.dataset.path || ""));
+  });
+  rootEl.querySelectorAll('[data-fe-act="enter"]').forEach((btn) => {
+    btn.addEventListener("click", () => onEnter?.(btn.dataset.path || ""));
+  });
+  rootEl.querySelectorAll('[data-fe-act="edit"]').forEach((btn) => {
+    btn.addEventListener("click", () => onEdit?.(btn.dataset.path));
+  });
+  rootEl.querySelectorAll('[data-fe-act="download"]').forEach((btn) => {
+    btn.addEventListener("click", () => onDownload?.(btn.dataset.path));
+  });
+  rootEl.querySelectorAll('[data-fe-act="delete"]').forEach((btn) => {
+    btn.addEventListener("click", () =>
+      onDelete?.(btn.dataset.path, btn.dataset.type || "file"),
+    );
+  });
+}
+
+async function downloadRawFile(apiBase, path) {
+  const url = `${apiBase}/${encodeURI(path)}/raw`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || res.statusText);
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = path.split("/").pop() || "download";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+async function uploadFilesToExplorer(apiBase, cwd, files) {
+  for (const file of files) {
+    const dest = joinExplorerPath(cwd, file.name);
+    const body = new FormData();
+    body.append("file", file);
+    const qs = new URLSearchParams({ path: dest });
+    const res = await fetch(`${apiBase}?${qs}`, { method: "POST", body });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || res.statusText);
+    }
+    toast(`Uploaded ${dest}`);
+  }
+}
+
 /** Display label for agents / templates: `{name} - {role}`. */
 function formatAgentLabel(agentOrTemplate, fallback = "Unknown agent") {
   if (!agentOrTemplate) return fallback;
@@ -452,6 +726,7 @@ const ADMIN_VIEWS = new Set([
   "chat",
   "activity",
   "sources",
+  "files",
   "executions",
   "system",
 ]);
@@ -461,6 +736,7 @@ const ADMIN_VIEWS = new Set([
  * Examples:
  *   /admin/agents
  *   /admin/sources/{sourceId}
+ *   /admin/files/{sourceId}?path=folder
  *   /admin/chat/{agentId}/{chatId}
  *   /admin/executions?agent={agentId}
  */
@@ -470,6 +746,15 @@ function buildAdminUrl() {
       return state.selectedSourceId
         ? `/admin/sources/${encodeURIComponent(state.selectedSourceId)}`
         : "/admin/sources";
+    case "files": {
+      const base = state.selectedFilesSourceId
+        ? `/admin/files/${encodeURIComponent(state.selectedFilesSourceId)}`
+        : "/admin/files";
+      if (state.selectedFilesSourceId && state.filesCwd) {
+        return `${base}?path=${encodeURIComponent(state.filesCwd)}`;
+      }
+      return base;
+    }
     case "activity":
       return "/admin/activity";
     case "chat":
@@ -514,6 +799,7 @@ function syncUrl({ replace = false } = {}) {
  * Supports:
  *   /admin/ | /admin/agents
  *   /admin/sources[/{id}]
+ *   /admin/files[/{id}][?path=]
  *   /admin/sessions → Chat (legacy redirect)
  *   /admin/chat[/{agentId}[/{chatId}]] or ?agent=[&kind=]
  *   /admin/executions[?agent=]
@@ -524,7 +810,15 @@ function parseAdminRoute() {
   let rest = "";
   if (raw === "/admin") rest = "";
   else if (raw.startsWith("/admin/")) rest = raw.slice("/admin/".length);
-  else return { view: "agents", agentId: null, chatId: null, sourceId: null };
+  else {
+    return {
+      view: "agents",
+      agentId: null,
+      chatId: null,
+      sourceId: null,
+      filesPath: null,
+    };
+  }
 
   const parts = rest.split("/").filter(Boolean).map((p) => {
     try {
@@ -540,9 +834,16 @@ function parseAdminRoute() {
     kindParam === "runs" || kindParam === "chats" || kindParam === "all"
       ? kindParam
       : null;
+  const filesPath = params.get("path") || null;
 
   if (!parts.length || head === "agents") {
-    return { view: "agents", agentId: null, chatId: null, sourceId: null };
+    return {
+      view: "agents",
+      agentId: null,
+      chatId: null,
+      sourceId: null,
+      filesPath: null,
+    };
   }
   if (head === "sources") {
     return {
@@ -550,6 +851,16 @@ function parseAdminRoute() {
       agentId: null,
       chatId: null,
       sourceId: parts[1] || null,
+      filesPath: null,
+    };
+  }
+  if (head === "files") {
+    return {
+      view: "files",
+      agentId: null,
+      chatId: null,
+      sourceId: parts[1] || null,
+      filesPath,
     };
   }
   // Legacy Sessions URL → Chat (optional ?kind=runs|chats).
@@ -559,15 +870,28 @@ function parseAdminRoute() {
       agentId: null,
       chatId: null,
       sourceId: null,
+      filesPath: null,
       sessionsKind: sessionsKind || "all",
     };
   }
   // Legacy Reports gallery URL → Chat (reports are session-only).
   if (head === "reports") {
-    return { view: "chat", agentId: null, chatId: null, sourceId: null };
+    return {
+      view: "chat",
+      agentId: null,
+      chatId: null,
+      sourceId: null,
+      filesPath: null,
+    };
   }
   if (head === "activity") {
-    return { view: "activity", agentId: null, chatId: null, sourceId: null };
+    return {
+      view: "activity",
+      agentId: null,
+      chatId: null,
+      sourceId: null,
+      filesPath: null,
+    };
   }
   if (head === "chat") {
     return {
@@ -575,6 +899,7 @@ function parseAdminRoute() {
       agentId: parts[1] || params.get("agent") || null,
       chatId: parts[2] || null,
       sourceId: null,
+      filesPath: null,
       sessionsKind,
     };
   }
@@ -584,18 +909,36 @@ function parseAdminRoute() {
       agentId: params.get("agent") || null,
       chatId: null,
       sourceId: null,
+      filesPath: null,
     };
   }
   if (head === "system") {
-    return { view: "system", agentId: null, chatId: null, sourceId: null };
+    return {
+      view: "system",
+      agentId: null,
+      chatId: null,
+      sourceId: null,
+      filesPath: null,
+    };
   }
-  return { view: "agents", agentId: null, chatId: null, sourceId: null };
+  return {
+    view: "agents",
+    agentId: null,
+    chatId: null,
+    sourceId: null,
+    filesPath: null,
+  };
 }
 
 /** Apply route ids into state before data loads (view UI updated separately). */
 function applyRouteIds(route) {
   if (route.view === "sources" && route.sourceId) {
     state.selectedSourceId = route.sourceId;
+  }
+  if (route.view === "files") {
+    if (route.sourceId) state.selectedFilesSourceId = route.sourceId;
+    state.filesCwd = route.filesPath || "";
+    state.filesEntries = null;
   }
   if (route.view === "executions" && route.agentId) {
     state.selectedAgentId = route.agentId;
@@ -659,6 +1002,24 @@ async function restoreFromRoute(route, { replaceUrl = false } = {}) {
         state.selectedSourceId = route.sourceId;
       }
       setView("sources");
+    } else if (view === "files") {
+      const fileSources = state.sources.filter((s) => s.type === "files");
+      if (
+        route.sourceId &&
+        fileSources.some((s) => s.id === route.sourceId)
+      ) {
+        state.selectedFilesSourceId = route.sourceId;
+      } else if (
+        state.selectedFilesSourceId &&
+        !fileSources.some((s) => s.id === state.selectedFilesSourceId)
+      ) {
+        state.selectedFilesSourceId = fileSources[0]?.id || null;
+      } else if (!state.selectedFilesSourceId && fileSources.length) {
+        state.selectedFilesSourceId = fileSources[0].id;
+      }
+      state.filesCwd = route.filesPath || "";
+      state.filesEntries = null;
+      setView("files");
     } else if (view === "executions") {
       if (route.agentId && state.agents.some((a) => a.id === route.agentId)) {
         state.selectedAgentId = route.agentId;
@@ -688,6 +1049,7 @@ async function onPopState() {
 }
 
 function setView(view, { skipUrl = false } = {}) {
+  const prevView = state.view;
   state.view = view;
   $$(".nav-item").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === view);
@@ -709,6 +1071,10 @@ function setView(view, { skipUrl = false } = {}) {
       "Data sources",
       "Library of SQL, NoSQL, and file sources agents can attach.",
     ],
+    files: [
+      "Files",
+      "Browse and manage files data sources in the library.",
+    ],
     executions: ["Executions", "Inspect runs, tool traces, and HTML reports."],
     system: ["System", "Harness health, usage, and service status."],
   };
@@ -718,6 +1084,8 @@ function setView(view, { skipUrl = false } = {}) {
   renderTopActions();
   render();
   if (!skipUrl) syncUrl();
+  if (view === "chat") startChatLivePoll();
+  else if (prevView === "chat") stopChatLivePoll();
 }
 
 function renderTopActions() {
@@ -737,6 +1105,10 @@ function renderTopActions() {
   } else if (state.view === "sources") {
     box.innerHTML = `<button type="button" class="primary-btn" id="btn-new-source">New data source</button>`;
     $("#btn-new-source").onclick = () => openSourceDialog();
+  } else if (state.view === "files") {
+    box.innerHTML = `<button type="button" class="primary-btn" id="btn-new-files-source">New files source</button>`;
+    $("#btn-new-files-source").onclick = () =>
+      openSourceDialog(null, { type: "files" });
   } else if (state.view === "executions") {
     box.innerHTML = `<button type="button" class="ghost-btn" id="btn-reload-logs">Reload logs</button>`;
     $("#btn-reload-logs").onclick = () => refreshSelectedLogs();
@@ -1111,6 +1483,19 @@ function syncProviderUi() {
   const endpointWrap = $("#agent-base-url-wrap");
   if (endpointWrap) endpointWrap.hidden = !isOllama;
 
+  const imageWrap = $("#agent-image-model-wrap");
+  const imageSupports = ["openai", "openrouter", "google"].includes(provider);
+  if (imageWrap) imageWrap.hidden = !imageSupports;
+  const imageHint = $("#image-model-hint");
+  if (imageHint && imageSupports) {
+    const defaults = {
+      openai: "gpt-image-1 (dall-e-3 fallback)",
+      openrouter: "google/gemini-2.5-flash-image",
+      google: "gemini-2.5-flash-image",
+    };
+    imageHint.textContent = `Optional override for generate_image. Blank → ${defaults[provider] || "provider default"}.`;
+  }
+
   const apiKey = $("#agent-api-key");
   const editing = Boolean(state.editingAgentId);
   if (apiKey) {
@@ -1317,8 +1702,11 @@ function emptyLibrarySource(type = "sql") {
     _connection_string_set: false,
     _ssh_password_set: false,
     _ssh_private_key_set: false,
+    _bearer_token_set: false,
+    _header_value_set: false,
     _files: null,
     _filesLoading: false,
+    _cwd: "",
   };
 }
 
@@ -1346,8 +1734,38 @@ function hydrateLibrarySource(source) {
       _connection_string_set: Boolean(cfg.connection_string_set),
       _ssh_password_set: Boolean(cfg.ssh?.password_set),
       _ssh_private_key_set: Boolean(cfg.ssh?.private_key_set),
+      _bearer_token_set: false,
+      _header_value_set: false,
       _files: null,
       _filesLoading: false,
+      _cwd: "",
+    };
+  }
+  if (type === "rest") {
+    return {
+      id: source.id || newSourceId(),
+      title: source.title || "",
+      description: source.description || "",
+      type: "rest",
+      config: {
+        base_url: cfg.base_url || "",
+        auth: cfg.auth || "none",
+        bearer_token: "",
+        header_name: cfg.header_name || "",
+        header_value: "",
+        allowed_path_prefixes: Array.isArray(cfg.allowed_path_prefixes)
+          ? cfg.allowed_path_prefixes.join("\n")
+          : "",
+        timeout_seconds: cfg.timeout_seconds ?? 15,
+      },
+      _connection_string_set: false,
+      _ssh_password_set: false,
+      _ssh_private_key_set: false,
+      _bearer_token_set: Boolean(cfg.bearer_token_set),
+      _header_value_set: Boolean(cfg.header_value_set),
+      _files: null,
+      _filesLoading: false,
+      _cwd: "",
     };
   }
   return {
@@ -1359,8 +1777,11 @@ function hydrateLibrarySource(source) {
     _connection_string_set: false,
     _ssh_password_set: false,
     _ssh_private_key_set: false,
+    _bearer_token_set: false,
+    _header_value_set: false,
     _files: null,
     _filesLoading: false,
+    _cwd: "",
   };
 }
 
@@ -1397,6 +1818,17 @@ function defaultConfigForType(type) {
         remote_host: "",
         remote_port: "",
       },
+    };
+  }
+  if (type === "rest") {
+    return {
+      base_url: "",
+      auth: "none",
+      bearer_token: "",
+      header_name: "",
+      header_value: "",
+      allowed_path_prefixes: "",
+      timeout_seconds: 15,
     };
   }
   return { path_prefix: "" };
@@ -1579,6 +2011,17 @@ function syncLibrarySourceFromDom() {
     const rp = $('[data-field="ssh_remote_port"]', root)?.value;
     ssh.remote_port = rp === "" || rp == null ? "" : Number(rp);
     src.config.ssh = ssh;
+  } else if (type === "rest") {
+    src.config.base_url = $('[data-field="base_url"]', root)?.value || "";
+    src.config.auth = $('[data-field="rest_auth"]', root)?.value || "none";
+    src.config.bearer_token = $('[data-field="bearer_token"]', root)?.value || "";
+    src.config.header_name = $('[data-field="header_name"]', root)?.value || "";
+    src.config.header_value = $('[data-field="header_value"]', root)?.value || "";
+    src.config.allowed_path_prefixes =
+      $('[data-field="allowed_path_prefixes"]', root)?.value || "";
+    src.config.timeout_seconds = Number(
+      $('[data-field="timeout_seconds"]', root)?.value || 15,
+    );
   } else {
     src.config.path_prefix = $('[data-field="path_prefix"]', root)?.value || "";
   }
@@ -1595,6 +2038,29 @@ function buildLibrarySourcePayload() {
       type: "files",
       config: {
         path_prefix: (src.config.path_prefix || "").trim() || null,
+      },
+    };
+  }
+  if (src.type === "rest") {
+    const prefixesRaw = src.config.allowed_path_prefixes || "";
+    const prefixes = String(prefixesRaw)
+      .split(/[\n,]+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const bearer = (src.config.bearer_token || "").trim();
+    const headerValue = (src.config.header_value || "").trim();
+    return {
+      title: src.title.trim(),
+      description: (src.description || "").trim(),
+      type: "rest",
+      config: {
+        base_url: (src.config.base_url || "").trim(),
+        auth: src.config.auth || "none",
+        ...(bearer ? { bearer_token: bearer } : {}),
+        header_name: (src.config.header_name || "").trim() || null,
+        ...(headerValue ? { header_value: headerValue } : {}),
+        allowed_path_prefixes: prefixes,
+        timeout_seconds: Number(src.config.timeout_seconds || 15),
       },
     };
   }
@@ -1717,55 +2183,70 @@ function renderDbSourceFields(src) {
 }
 
 function renderFilesSourceFields(src, editing) {
-  const filesBlock = !editing
-    ? `<p class="hint span-2">Save the source first, then reopen edit to upload files into <code>_library/${escapeHtml(src.id)}</code>.</p>`
-    : renderFilesManager(src);
+  const openLink = editing
+    ? `<p class="hint span-2 files-open-link">
+        Manage uploads and folders in the Files section.
+        <button type="button" class="ghost-btn" data-open-files-source="${escapeHtml(src.id)}">Open in Files</button>
+      </p>`
+    : `<p class="hint span-2">Save the source first, then manage files from the <strong>Files</strong> nav.</p>`;
   return `
     <label class="span-2">
       Path prefix (optional)
       <input data-field="path_prefix" value="${escapeHtml(src.config.path_prefix || "")}" placeholder="notes/" />
-      <span class="hint">Files live under <code>data/agent_workspaces/_library/{source_id}/</code> and are mounted for attached agents at <code>sources/{source_id}/</code>.</span>
+      <span class="hint">Files live under <code>data/agent_workspaces/_library/{source_id}/</code> and are mounted for attached agents at <code>sources/{source_id}/</code>. CSV/TSV/XLSX become queryable via <code>run_file_sql</code>.</span>
     </label>
-    ${filesBlock}
+    ${openLink}
   `;
 }
 
-function renderFilesManager(src) {
-  if (src._filesLoading) {
-    return `<p class="hint span-2">Loading files…</p>`;
-  }
-  const rows = (src._files || [])
-    .map(
-      (f) => `
-      <li class="source-file-row">
-        <span class="mono">${escapeHtml(f.path)}</span>
-        <span class="muted">${f.size} B</span>
-        <span class="row-actions">
-          ${
-            f.is_text
-              ? `<button type="button" class="ghost-btn" data-act="edit-file" data-path="${escapeHtml(f.path)}">Edit</button>`
-              : ""
-          }
-          <button type="button" class="ghost-btn" data-act="delete-file" data-path="${escapeHtml(f.path)}">Delete</button>
-        </span>
-      </li>`,
-    )
-    .join("");
+function renderRestSourceFields(src) {
+  const auth = src.config.auth || "none";
+  const prefixes =
+    typeof src.config.allowed_path_prefixes === "string"
+      ? src.config.allowed_path_prefixes
+      : (src.config.allowed_path_prefixes || []).join("\n");
+  const authFields =
+    auth === "bearer"
+      ? `<label class="span-2">
+          Bearer token ${src._bearer_token_set ? "(set — leave blank to keep)" : ""}
+          <input data-field="bearer_token" type="password" autocomplete="off" placeholder="${src._bearer_token_set ? "•••• configured" : "token"}" />
+        </label>`
+      : auth === "header"
+        ? `<label>
+            Header name
+            <input data-field="header_name" value="${escapeHtml(src.config.header_name || "")}" placeholder="X-API-Key" />
+          </label>
+          <label>
+            Header value ${src._header_value_set ? "(set — leave blank to keep)" : ""}
+            <input data-field="header_value" type="password" autocomplete="off" placeholder="${src._header_value_set ? "•••• configured" : "secret"}" />
+          </label>`
+        : `<input type="hidden" data-field="bearer_token" value="" />
+           <input type="hidden" data-field="header_name" value="" />
+           <input type="hidden" data-field="header_value" value="" />`;
   return `
-    <div class="span-2 source-files">
-      <div class="sources-head">
-        <span class="field-label">Files</span>
-        <div class="row-actions">
-          <button type="button" class="ghost-btn" data-act="refresh-files">Refresh</button>
-        </div>
-      </div>
-      <label class="source-file-dropzone" data-dropzone>
-        <span class="source-file-dropzone-label">Drop files here or click to upload</span>
-        <span class="source-file-dropzone-hint muted">PDF, text, and other files supported</span>
-        <input type="file" data-act="upload-file" multiple hidden />
-      </label>
-      <ul class="source-file-list">${rows || '<li class="muted">No files yet</li>'}</ul>
-    </div>`;
+    <label class="span-2">
+      Base URL
+      <input data-field="base_url" value="${escapeHtml(src.config.base_url || "")}" placeholder="https://api.example.com" required />
+    </label>
+    <label>
+      Auth
+      <select data-field="rest_auth">
+        <option value="none" ${auth === "none" ? "selected" : ""}>none</option>
+        <option value="bearer" ${auth === "bearer" ? "selected" : ""}>bearer</option>
+        <option value="header" ${auth === "header" ? "selected" : ""}>header</option>
+      </select>
+    </label>
+    <label>
+      Timeout (seconds)
+      <input data-field="timeout_seconds" type="number" min="1" max="60" value="${escapeHtml(src.config.timeout_seconds ?? 15)}" />
+    </label>
+    ${authFields}
+    <label class="span-2">
+      Allowed path prefixes (one per line)
+      <textarea data-field="allowed_path_prefixes" rows="3" placeholder="/v1/orders&#10;/v1/customers">${escapeHtml(prefixes)}</textarea>
+      <span class="hint">GET-only. Paths must stay under these prefixes; host escapes and other methods are rejected.</span>
+    </label>
+  `;
 }
 
 function renderSourceFormBody() {
@@ -1776,7 +2257,9 @@ function renderSourceFormBody() {
   const typeFields =
     src.type === "files"
       ? renderFilesSourceFields(src, editing)
-      : renderDbSourceFields(src);
+      : src.type === "rest"
+        ? renderRestSourceFields(src)
+        : renderDbSourceFields(src);
   body.innerHTML = `
     <div class="source-grid">
       <label>
@@ -1789,6 +2272,7 @@ function renderSourceFormBody() {
           <option value="sql" ${src.type === "sql" ? "selected" : ""}>sql</option>
           <option value="nosql" ${src.type === "nosql" ? "selected" : ""}>nosql</option>
           <option value="files" ${src.type === "files" ? "selected" : ""}>files</option>
+          <option value="rest" ${src.type === "rest" ? "selected" : ""}>rest</option>
         </select>
       </label>
       <label class="span-2">
@@ -1807,6 +2291,7 @@ function renderSourceFormBody() {
     src.type = event.target.value;
     src.config = defaultConfigForType(src.type);
     src._files = null;
+    src._cwd = "";
     renderSourceFormBody();
   });
   $('[data-field="ssh_enabled"]', body)?.addEventListener("change", () => {
@@ -1817,132 +2302,18 @@ function renderSourceFormBody() {
     syncLibrarySourceFromDom();
     renderSourceFormBody();
   });
-  $('[data-act="refresh-files"]', body)?.addEventListener("click", () => {
-    loadLibrarySourceFiles();
-  });
-  const uploadInput = $('[data-act="upload-file"]', body);
-  const dropzone = $("[data-dropzone]", body);
-  uploadInput?.addEventListener("change", async (event) => {
-    const files = [...(event.target.files || [])];
-    if (!files.length) return;
-    await uploadLibrarySourceFiles(files);
-    event.target.value = "";
-  });
-  if (dropzone) {
-    let dragDepth = 0;
-    dropzone.addEventListener("dragenter", (event) => {
-      event.preventDefault();
-      dragDepth += 1;
-      dropzone.classList.add("is-dragover");
-    });
-    dropzone.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-    });
-    dropzone.addEventListener("dragleave", (event) => {
-      event.preventDefault();
-      dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) dropzone.classList.remove("is-dragover");
-    });
-    dropzone.addEventListener("drop", async (event) => {
-      event.preventDefault();
-      dragDepth = 0;
-      dropzone.classList.remove("is-dragover");
-      const files = [...(event.dataTransfer?.files || [])];
-      if (!files.length) return;
-      await uploadLibrarySourceFiles(files);
-      if (uploadInput) uploadInput.value = "";
-    });
-  }
-  $$('[data-act="edit-file"]', body).forEach((btn) => {
-    btn.addEventListener("click", () => editLibrarySourceFile(btn.dataset.path));
-  });
-  $$('[data-act="delete-file"]', body).forEach((btn) => {
-    btn.addEventListener("click", () => deleteLibrarySourceFile(btn.dataset.path));
-  });
-
-  if (editing && src.type === "files" && src._files === null && !src._filesLoading) {
-    loadLibrarySourceFiles();
-  }
-}
-
-async function loadLibrarySourceFiles() {
-  const src = draftLibrarySource;
-  if (!src || src.type !== "files" || !state.editingSourceId) return;
-  src._filesLoading = true;
-  renderSourceFormBody();
-  try {
-    src._files = await api(`/sources/${state.editingSourceId}/files`);
-  } catch (err) {
-    toast(err.message, "error");
-    src._files = [];
-  } finally {
-    src._filesLoading = false;
+  $('[data-field="rest_auth"]', body)?.addEventListener("change", () => {
+    syncLibrarySourceFromDom();
     renderSourceFormBody();
-  }
+  });
+  $("[data-open-files-source]", body)?.addEventListener("click", () => {
+    const sourceId = $("[data-open-files-source]", body)?.dataset.openFilesSource;
+    closeSourceDialog();
+    openFilesSource(sourceId);
+  });
 }
 
-async function uploadLibrarySourceFiles(files) {
-  for (const file of files) {
-    await uploadLibrarySourceFile(file, { refresh: false });
-  }
-  await loadLibrarySourceFiles();
-}
-
-async function uploadLibrarySourceFile(file, { refresh = true } = {}) {
-  if (!state.editingSourceId) return;
-  const body = new FormData();
-  body.append("file", file);
-  try {
-    const res = await fetch(`/sources/${state.editingSourceId}/files`, {
-      method: "POST",
-      body,
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.detail || res.statusText);
-    }
-    toast(`Uploaded ${file.name}`);
-    if (refresh) await loadLibrarySourceFiles();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function editLibrarySourceFile(path) {
-  if (!state.editingSourceId) return;
-  try {
-    const data = await api(
-      `/sources/${state.editingSourceId}/files/${encodeURI(path)}`,
-    );
-    const next = prompt(`Edit ${path}`, data.content);
-    if (next == null) return;
-    await api(`/sources/${state.editingSourceId}/files/${encodeURI(path)}`, {
-      method: "PUT",
-      body: JSON.stringify({ content: next }),
-    });
-    toast("File updated");
-    await loadLibrarySourceFiles();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function deleteLibrarySourceFile(path) {
-  if (!state.editingSourceId) return;
-  if (!confirm(`Delete file “${path}”?`)) return;
-  try {
-    await api(`/sources/${state.editingSourceId}/files/${encodeURI(path)}`, {
-      method: "DELETE",
-    });
-    toast("File deleted");
-    await loadLibrarySourceFiles();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function openSourceDialog(source = null) {
+async function openSourceDialog(source = null, { type } = {}) {
   state.editingSourceId = source?.id || null;
   let full = source;
   if (source?.id) {
@@ -1955,7 +2326,7 @@ async function openSourceDialog(source = null) {
   }
   draftLibrarySource = full
     ? hydrateLibrarySource(full)
-    : emptyLibrarySource("sql");
+    : emptyLibrarySource(type || "sql");
   $("#source-dialog-title").textContent = state.editingSourceId
     ? "Edit data source"
     : "New data source";
@@ -2045,18 +2416,26 @@ async function saveSource(event) {
         body: JSON.stringify(payload),
       });
       toast("Data source updated");
+      if (payload.type === "files") {
+        state.selectedFilesSourceId = state.editingSourceId;
+      }
     } else {
       const created = await api("/sources", {
         method: "POST",
         body: JSON.stringify(payload),
       });
       state.selectedSourceId = created.id;
+      if (created.type === "files") {
+        state.selectedFilesSourceId = created.id;
+        state.filesCwd = "";
+        state.filesEntries = null;
+      }
       toast("Data source created");
     }
     closeSourceDialog();
     await loadSources();
     render();
-    if (state.view === "sources") syncUrl();
+    if (state.view === "sources" || state.view === "files") syncUrl();
   } catch (err) {
     toast(err.message, "error");
   }
@@ -2068,10 +2447,15 @@ async function deleteSource(source) {
   try {
     await api(`/sources/${source.id}`, { method: "DELETE" });
     if (state.selectedSourceId === source.id) state.selectedSourceId = null;
+    if (state.selectedFilesSourceId === source.id) {
+      state.selectedFilesSourceId = null;
+      state.filesCwd = "";
+      state.filesEntries = null;
+    }
     toast("Data source deleted");
     await loadSources();
     render();
-    if (state.view === "sources") syncUrl();
+    if (state.view === "sources" || state.view === "files") syncUrl();
   } catch (err) {
     toast(err.message, "error");
   }
@@ -2112,6 +2496,8 @@ function applyAgentTemplate(templateId) {
     form.provider.value = "openai";
     form.api_key.value = "";
     if (form.base_url) form.base_url.value = "";
+    const imageModel = $("#agent-image-model");
+    if (imageModel) imageModel.value = "";
     applyCronToUi(null);
     setPromptValue("system", "");
     setPromptValue("default", "");
@@ -2130,6 +2516,8 @@ function applyAgentTemplate(templateId) {
   // Explicitly leave secrets and schedule alone / cleared.
   form.api_key.value = "";
   if (form.base_url) form.base_url.value = "";
+  const imageModelClear = $("#agent-image-model");
+  if (imageModelClear) imageModelClear.value = "";
   applyCronToUi(null);
   setPromptValue("system", template.system_prompt || "");
   setPromptValue("default", template.default_prompt || "");
@@ -2165,6 +2553,10 @@ function openAgentDialog(agent = null) {
     : "sk-…";
   if (form.base_url) {
     form.base_url.value = agent?.base_url || "";
+  }
+  const imageModel = $("#agent-image-model");
+  if (imageModel) {
+    imageModel.value = agent?.image_model || "";
   }
   if (editing && agent?.api_key_set && agent?.api_key_preview) {
     $("#api-key-hint").textContent =
@@ -2241,6 +2633,12 @@ function readAgentForm({ includeApiKey }) {
     provider === "ollama"
       ? (form.base_url?.value || "").trim() || null
       : null;
+  if (["openai", "openrouter", "google"].includes(provider)) {
+    const imageModel = ($("#agent-image-model")?.value || "").trim();
+    payload.image_model = imageModel || null;
+  } else {
+    payload.image_model = null;
+  }
   // Image upload wins; otherwise persist the selected preset (or clear to initials).
   if (!draftAvatar.file) {
     payload.avatar_preset = draftAvatar.preset || null;
@@ -2434,6 +2832,7 @@ function prepareNewChatContext() {
   state.chatStreamingText = "";
   state.chatStreamStarted = false;
   state.chatStreamGeneratingHtml = false;
+  state.chatStreamGeneratingImage = false;
   state.chatStreamTools = [];
   const input = $("#chat-input");
   if (input) input.value = "";
@@ -2644,7 +3043,17 @@ function normalizeChatMessages(messages) {
 }
 
 function revokeHtmlBlobUrls() {
+  // Keep the expand-dialog blob alive while the report dialog is open so chat
+  // re-renders (which call wireChatHtmlPreviews → revoke) do not blank it.
+  const reportDialog = $("#report-dialog");
+  const reportFrame = $("#report-frame");
+  const keepUrl =
+    reportDialog?.open && reportFrame?.src?.startsWith("blob:")
+      ? reportFrame.src
+      : null;
+
   for (const url of _htmlBlobUrls) {
+    if (keepUrl && url === keepUrl) continue;
     try {
       URL.revokeObjectURL(url);
     } catch {
@@ -2652,6 +3061,7 @@ function revokeHtmlBlobUrls() {
     }
   }
   _htmlBlobUrls.clear();
+  if (keepUrl) _htmlBlobUrls.add(keepUrl);
 }
 
 /** Source of truth after any stream end — do not trust SSE done payloads for transcript. */
@@ -2664,6 +3074,88 @@ async function refreshChatMessagesFromServer() {
     if (chat.agent_id) state.chatAgentId = chat.agent_id;
   } catch {
     /* keep optimistic state */
+  }
+}
+
+/** Fingerprint for cheap change detection (avoid flicker on no-op polls). */
+function chatMessagesFingerprint(messages) {
+  const msgs = messages || [];
+  if (!msgs.length) return "0";
+  const last = msgs[msgs.length - 1];
+  const contentLen = String(last.content || "").length;
+  const htmlFlag = last.html ? 1 : 0;
+  return `${msgs.length}:${last.timestamp || ""}:${contentLen}:${htmlFlag}`;
+}
+
+function sessionsFingerprint(sessions) {
+  return (sessions || [])
+    .map(
+      (s) =>
+        `${s.id}:${s.message_count || 0}:${s.updated_at || ""}:${s.unread_count || 0}:${s.unread_runs || 0}`,
+    )
+    .join("|");
+}
+
+function isChatThreadNearBottom(thread, thresholdPx = 96) {
+  if (!thread) return true;
+  return (
+    thread.scrollHeight - thread.scrollTop - thread.clientHeight <= thresholdPx
+  );
+}
+
+function stopChatLivePoll() {
+  if (state.chatPollTimer) {
+    clearInterval(state.chatPollTimer);
+    state.chatPollTimer = null;
+  }
+}
+
+function startChatLivePoll() {
+  stopChatLivePoll();
+  state.chatPollTimer = setInterval(() => {
+    pollOpenChat().catch(() => {});
+  }, 2750);
+}
+
+/**
+ * Poll open chat for background updates (cron runs, handoffs).
+ * SSE still owns the interactive send path; skip while streaming.
+ */
+async function pollOpenChat() {
+  if (state.view !== "chat" || !state.chatId || state.chatSending) return;
+
+  const thread = $("#chat-messages");
+  const wasNearBottom = isChatThreadNearBottom(thread);
+  const savedScrollTop = thread?.scrollTop ?? 0;
+  const prevMsgFp = chatMessagesFingerprint(state.chatMessages);
+  const prevSessionsFp = sessionsFingerprint(state.allSessions);
+
+  await refreshChatMessagesFromServer();
+  try {
+    await loadAllSessions();
+  } catch {
+    /* ignore session refresh failures */
+  }
+
+  // Bail if user left chat / started sending while we were fetching.
+  if (state.view !== "chat" || !state.chatId || state.chatSending) return;
+
+  const messagesChanged =
+    chatMessagesFingerprint(state.chatMessages) !== prevMsgFp;
+  const sessionsChanged =
+    sessionsFingerprint(state.allSessions) !== prevSessionsFp;
+
+  if (!messagesChanged && !sessionsChanged) return;
+
+  if (messagesChanged) {
+    await markChatRead(state.chatId);
+  }
+
+  renderChatPanel({ stickToBottom: false });
+  const t = $("#chat-messages");
+  if (t) {
+    t.scrollTop =
+      messagesChanged && wasNearBottom ? t.scrollHeight : savedScrollTop;
   }
 }
 
@@ -2744,6 +3236,7 @@ async function sendChatMessage(event) {
   state.chatStreamingText = "";
   state.chatStreamStarted = false;
   state.chatStreamGeneratingHtml = false;
+  state.chatStreamGeneratingImage = false;
   state.chatStreamTools = [];
   state.chatMessages = [
     ...state.chatMessages,
@@ -2798,6 +3291,12 @@ async function sendChatMessage(event) {
         if (name === "write_html_report") {
           state.chatStreamGeneratingHtml = true;
         }
+        if (name === "generate_image" && phase === "start") {
+          state.chatStreamGeneratingImage = true;
+        }
+        if (name === "generate_image" && phase === "end") {
+          state.chatStreamGeneratingImage = false;
+        }
         const tools = state.chatStreamTools.slice();
         const existing = tools.findIndex(
           (t) => t.name === name && t.phase === "start",
@@ -2814,6 +3313,7 @@ async function sendChatMessage(event) {
         state.chatStreamingText = "";
         state.chatStreamStarted = false;
         state.chatStreamGeneratingHtml = false;
+        state.chatStreamGeneratingImage = false;
         state.chatStreamTools = [];
         renderChatPanel();
       } else if (eventName === "error") {
@@ -2823,6 +3323,7 @@ async function sendChatMessage(event) {
         state.chatStreamingText = "";
         state.chatStreamStarted = false;
         state.chatStreamGeneratingHtml = false;
+        state.chatStreamGeneratingImage = false;
         state.chatStreamTools = [];
         renderChatPanel();
       }
@@ -2834,6 +3335,16 @@ async function sendChatMessage(event) {
     if (state.chatId === streamingChatId) {
       await markChatRead(streamingChatId);
       renderChatPanel();
+      const hasImage = (state.chatMessages || []).some((m) =>
+        (m.attachments || []).some(isImageAttachment),
+      );
+      if (hasImage) {
+        requestAnimationFrame(() => {
+          const figs = $("#chat-messages")?.querySelectorAll(".chat-image-figure");
+          const target = figs?.length ? figs[figs.length - 1] : null;
+          target?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+        });
+      }
     }
     loadActivity().catch(() => {});
   } catch (err) {
@@ -2849,6 +3360,7 @@ async function sendChatMessage(event) {
     state.chatStreamingText = "";
     state.chatStreamStarted = false;
     state.chatStreamGeneratingHtml = false;
+    state.chatStreamGeneratingImage = false;
     state.chatStreamTools = [];
     renderChatPanel();
     if (state.chatMessages.some((m) => m.html)) scrollLatestReportIntoView();
@@ -2856,7 +3368,7 @@ async function sendChatMessage(event) {
   }
 }
 
-function renderChatPanel() {
+function renderChatPanel({ stickToBottom = true } = {}) {
   const list = $("#chat-list");
   const thread = $("#chat-messages");
   const status = $("#chat-status");
@@ -2976,7 +3488,7 @@ function renderChatPanel() {
       .join("");
     thread.innerHTML = messagesHtml + pendingBubble;
     wireChatHtmlPreviews(thread);
-    thread.scrollTop = thread.scrollHeight;
+    if (stickToBottom) thread.scrollTop = thread.scrollHeight;
   }
 
   if (status) {
@@ -2985,6 +3497,8 @@ function renderChatPanel() {
       const hasTools = (state.chatStreamTools || []).length > 0;
       if (state.chatStreamGeneratingHtml) {
         status.textContent = "Generating HTML report…";
+      } else if (state.chatStreamGeneratingImage) {
+        status.textContent = "Generating image…";
       } else if (state.chatStreamStarted) {
         status.textContent = "Streaming reply…";
       } else if (hasTools) {
@@ -3007,10 +3521,13 @@ function renderChatPanel() {
     } else {
       attachBar.hidden = false;
       attachBar.innerHTML = atts
-        .map(
-          (a) =>
-            `<span class="chip" title="${escapeHtml(a.path)}">${escapeHtml(a.name)}</span>`,
-        )
+        .map((a) => {
+          if (isImageAttachment(a) && state.chatId) {
+            const src = chatAttachmentUrl(a.name || a.path);
+            return `<a class="chat-attach-thumb" href="${escapeHtml(src)}" target="_blank" rel="noopener" title="${escapeHtml(a.name)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(a.name)}" loading="lazy" /></a>`;
+          }
+          return `<span class="chip" title="${escapeHtml(a.path)}">${escapeHtml(a.name)}</span>`;
+        })
         .join(" ");
     }
   }
@@ -3534,6 +4051,264 @@ function selectedSource() {
   return state.sources.find((s) => s.id === state.selectedSourceId) || null;
 }
 
+function filesSources() {
+  return state.sources.filter((s) => s.type === "files");
+}
+
+function selectedFilesSource() {
+  return (
+    filesSources().find((s) => s.id === state.selectedFilesSourceId) || null
+  );
+}
+
+function filesSourceApiBase(sourceId = state.selectedFilesSourceId) {
+  if (!sourceId) return null;
+  return `/sources/${sourceId}/files`;
+}
+
+function openFilesSource(sourceId, cwd = "") {
+  const fileSources = filesSources();
+  const match = fileSources.find((s) => s.id === sourceId);
+  state.selectedFilesSourceId = match?.id || fileSources[0]?.id || null;
+  state.filesCwd = cwd || "";
+  state.filesEntries = null;
+  setView("files");
+}
+
+function ensureFilesSelection() {
+  const fileSources = filesSources();
+  if (!fileSources.length) {
+    state.selectedFilesSourceId = null;
+    return null;
+  }
+  if (
+    !state.selectedFilesSourceId ||
+    !fileSources.some((s) => s.id === state.selectedFilesSourceId)
+  ) {
+    state.selectedFilesSourceId = fileSources[0].id;
+    state.filesCwd = "";
+    state.filesEntries = null;
+  }
+  return selectedFilesSource();
+}
+
+function renderFilesView() {
+  const root = $("#view-files");
+  if (!root) return;
+  const fileSources = filesSources();
+  if (!fileSources.length) {
+    root.innerHTML = `
+      <div class="panel">
+        <div class="empty">
+          No files sources yet.
+          <div style="margin-top:0.85rem">
+            <button type="button" class="primary-btn" id="btn-files-create-empty">
+              Create files source
+            </button>
+          </div>
+        </div>
+      </div>`;
+    $("#btn-files-create-empty")?.addEventListener("click", () =>
+      openSourceDialog(null, { type: "files" }),
+    );
+    return;
+  }
+
+  const source = ensureFilesSelection();
+  root.innerHTML = `
+    <div class="layout-split">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Files sources</h3>
+          <span class="muted">${fileSources.length}</span>
+        </div>
+        <div class="panel-body" style="padding:0">
+          <ul class="files-source-picker">
+            ${fileSources
+              .map(
+                (s) => `
+              <li>
+                <button type="button" class="${
+                  s.id === state.selectedFilesSourceId ? "is-active" : ""
+                }" data-files-source="${escapeHtml(s.id)}">
+                  <strong>${escapeHtml(s.title || s.id)}</strong>
+                  <span class="muted">${escapeHtml(excerpt(s.description || "", 72))}</span>
+                </button>
+              </li>`,
+              )
+              .join("")}
+          </ul>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>${escapeHtml(source?.title || "Files")}</h3>
+          <span class="muted mono">${escapeHtml(source?.id || "")}</span>
+        </div>
+        <div class="panel-body">
+          <div class="source-files" style="border-top:0;padding-top:0;margin-top:0">
+            ${renderFileExplorerHtml({
+              cwd: state.filesCwd || "",
+              entries: state.filesEntries,
+              loading: state.filesLoading,
+              label: "Explorer",
+              viewMode: state.filesViewMode,
+              showViewToggle: true,
+            })}
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  $$("[data-files-source]", root).forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.filesSource;
+      if (id === state.selectedFilesSourceId) return;
+      state.selectedFilesSourceId = id;
+      state.filesCwd = "";
+      state.filesEntries = null;
+      syncUrl();
+      renderFilesView();
+    });
+  });
+
+  const explorer = $("[data-file-explorer]", root);
+  if (explorer) {
+    bindFileExplorer(explorer, {
+      onRefresh: () => loadFilesViewEntries(),
+      onMkdir: () => mkdirFilesViewDir(),
+      onUpload: (files) => uploadFilesViewFiles(files),
+      onEnter: (path) => {
+        state.filesCwd = path || "";
+        state.filesEntries = null;
+        syncUrl();
+        renderFilesView();
+      },
+      onCrumb: (path) => {
+        state.filesCwd = path || "";
+        state.filesEntries = null;
+        syncUrl();
+        renderFilesView();
+      },
+      onEdit: (path) => editFilesViewFile(path),
+      onDownload: (path) => downloadFilesViewFile(path),
+      onDelete: (path, type) => deleteFilesViewEntry(path, type),
+      onViewMode: (mode) => {
+        state.filesViewMode = mode === "grid" ? "grid" : "list";
+        renderFilesView();
+      },
+    });
+  }
+
+  if (state.filesEntries == null && !state.filesLoading) {
+    loadFilesViewEntries();
+  }
+}
+
+async function loadFilesViewEntries() {
+  const base = filesSourceApiBase();
+  if (!base) return;
+  state.filesLoading = true;
+  renderFilesView();
+  try {
+    const cwd = state.filesCwd || "";
+    const qs = cwd ? `?path=${encodeURIComponent(cwd)}` : "";
+    state.filesEntries = await api(`${base}${qs}`);
+  } catch (err) {
+    toast(err.message, "error");
+    state.filesEntries = [];
+  } finally {
+    state.filesLoading = false;
+    renderFilesView();
+  }
+}
+
+async function uploadFilesViewFiles(files) {
+  const base = filesSourceApiBase();
+  if (!base) return;
+  try {
+    await uploadFilesToExplorer(base, state.filesCwd || "", files);
+    await loadFilesViewEntries();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function mkdirFilesViewDir() {
+  const base = filesSourceApiBase();
+  if (!base) return;
+  const name = window.prompt("New folder name");
+  if (!name || !name.trim()) return;
+  const path = joinExplorerPath(state.filesCwd || "", name.trim());
+  try {
+    await api(`${base}/mkdir`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    toast(`Created ${path}/`);
+    await loadFilesViewEntries();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function editFilesViewFile(path) {
+  const base = filesSourceApiBase();
+  if (!base) return;
+  try {
+    const data = await api(`${base}/${encodeURI(path)}`);
+    const next = await promptFileEditDialog(path, data.content);
+    if (next == null) return;
+    await api(`${base}/${encodeURI(path)}`, {
+      method: "PUT",
+      body: JSON.stringify({ content: next }),
+    });
+    toast("File updated");
+    await loadFilesViewEntries();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function downloadFilesViewFile(path) {
+  const base = filesSourceApiBase();
+  if (!base) return;
+  try {
+    await downloadRawFile(base, path);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function deleteFilesViewEntry(path, type = "file") {
+  const base = filesSourceApiBase();
+  if (!base) return;
+  const label = type === "dir" ? "folder" : "file";
+  const ok = await confirmDialog({
+    title: `Delete ${label}`,
+    message:
+      type === "dir"
+        ? `Delete folder “${path}” and everything inside it? This cannot be undone.`
+        : `Delete file “${path}”?`,
+    confirmLabel: "Delete",
+  });
+  if (!ok) return;
+  try {
+    await api(`${base}/${encodeURI(path)}`, { method: "DELETE" });
+    toast(`Deleted ${path}`);
+    if (
+      (state.filesCwd || "") === path ||
+      (state.filesCwd || "").startsWith(`${path}/`)
+    ) {
+      state.filesCwd = explorerParentPath(path);
+    }
+    await loadFilesViewEntries();
+    syncUrl();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
 function renderSources() {
   const root = $("#view-sources");
   if (!state.sources.length) {
@@ -3616,19 +4391,33 @@ function renderSourceDetail(source) {
     return;
   }
   const cfg = source.config || {};
-  const cfgLines =
-    source.type === "files"
-      ? `<div><dt>Path prefix</dt><dd>${escapeHtml(cfg.path_prefix || "—")}</dd></div>
-         <div><dt>Files root</dt><dd><code>_library/${escapeHtml(source.id)}/</code></dd></div>`
-      : `<div><dt>Engine</dt><dd>${escapeHtml(cfg.engine || "—")}</dd></div>
+  let cfgLines = "";
+  if (source.type === "files") {
+    cfgLines = `<div><dt>Path prefix</dt><dd>${escapeHtml(cfg.path_prefix || "—")}</dd></div>
+         <div><dt>Files root</dt><dd><code>_library/${escapeHtml(source.id)}/</code></dd></div>
+         <div><dt>File SQL</dt><dd>CSV/TSV/XLSX via <code>run_file_sql</code></dd></div>`;
+  } else if (source.type === "rest") {
+    const prefixes = Array.isArray(cfg.allowed_path_prefixes)
+      ? cfg.allowed_path_prefixes.join(", ")
+      : "";
+    cfgLines = `<div><dt>Base URL</dt><dd>${escapeHtml(cfg.base_url || "—")}</dd></div>
+         <div><dt>Auth</dt><dd>${escapeHtml(cfg.auth || "none")}</dd></div>
+         <div><dt>Bearer</dt><dd>${cfg.bearer_token_set ? "configured" : "—"}</dd></div>
+         <div><dt>Header</dt><dd>${cfg.header_name ? escapeHtml(cfg.header_name) : "—"}${cfg.header_value_set ? " (set)" : ""}</dd></div>
+         <div><dt>Path prefixes</dt><dd>${escapeHtml(prefixes || "—")}</dd></div>
+         <div><dt>Timeout</dt><dd>${escapeHtml(cfg.timeout_seconds ?? 15)}s</dd></div>`;
+  } else {
+    cfgLines = `<div><dt>Engine</dt><dd>${escapeHtml(cfg.engine || "—")}</dd></div>
          <div><dt>Connection</dt><dd>${cfg.connection_string_set ? "configured" : "missing"}</dd></div>
          <div><dt>SSH</dt><dd>${cfg.ssh?.enabled ? "enabled" : "off"}</dd></div>`;
+  }
 
+  const schemaLabel = source.type === "nosql" ? "Collections" : "Tables";
   const tablesSection =
-    source.type === "sql"
+    source.type === "sql" || source.type === "nosql"
       ? `<div class="schema-panel" style="margin-top:1.25rem">
           <div class="panel-head" style="padding:0 0 0.5rem;border:0">
-            <h3 style="font-size:1rem">Tables</h3>
+            <h3 style="font-size:1rem">${schemaLabel}</h3>
             <button type="button" class="ghost-btn" id="detail-source-schema-refresh">Refresh</button>
           </div>
           <div id="detail-source-schema" class="schema-tables">
@@ -3659,7 +4448,7 @@ function renderSourceDetail(source) {
     </div>`;
   $("#detail-source-edit").onclick = () => openSourceDialog(source);
   $("#detail-source-test").onclick = () => testSavedSource(source);
-  if (source.type === "sql") {
+  if (source.type === "sql" || source.type === "nosql") {
     const refreshBtn = $("#detail-source-schema-refresh");
     if (refreshBtn) {
       refreshBtn.onclick = () => loadSourceSchema(source.id);
@@ -3671,7 +4460,9 @@ function renderSourceDetail(source) {
 function renderSchemaTables(schema) {
   const tables = schema?.tables || [];
   if (!tables.length) {
-    return `<p class="muted">No tables found in this database.</p>`;
+    const emptyLabel =
+      schema?.engine === "mongodb" ? "No collections found." : "No tables found in this database.";
+    return `<p class="muted">${emptyLabel}</p>`;
   }
   return `<ul class="schema-table-list">
     ${tables
@@ -3940,7 +4731,6 @@ function openReport(html) {
   } catch {
     frame.srcdoc = html;
   }
-  frame.style.minHeight = "360px";
   $("#report-dialog").showModal();
 }
 
@@ -4166,6 +4956,7 @@ function render() {
   else if (state.view === "chat") renderChatView();
   else if (state.view === "activity") renderActivity();
   else if (state.view === "sources") renderSources();
+  else if (state.view === "files") renderFilesView();
   else if (state.view === "executions") renderExecutions();
   else renderSystem();
 }
@@ -4217,6 +5008,37 @@ function renderChatMarkdown(text) {
   }
 }
 
+function isImageAttachment(att) {
+  if (!att) return false;
+  const ct = String(att.content_type || "").toLowerCase();
+  if (ct.startsWith("image/")) return true;
+  const name = String(att.name || att.path || "").toLowerCase();
+  return /\.(png|jpe?g|gif|webp|svg)$/.test(name);
+}
+
+function chatAttachmentUrl(filename) {
+  if (!state.chatId || !filename) return "";
+  return `/chats/${encodeURIComponent(state.chatId)}/attachments/${encodeURIComponent(filename)}`;
+}
+
+function renderMessageImageAttachments(attachments) {
+  const images = (attachments || []).filter(isImageAttachment);
+  if (!images.length || !state.chatId) return "";
+  const figs = images
+    .map((a) => {
+      const name = a.name || a.path;
+      const src = chatAttachmentUrl(name);
+      return `<figure class="chat-image-figure">
+        <a href="${escapeHtml(src)}" target="_blank" rel="noopener">
+          <img class="chat-image-preview" src="${escapeHtml(src)}" alt="${escapeHtml(name)}" loading="lazy" />
+        </a>
+        <figcaption class="muted">${escapeHtml(name)}</figcaption>
+      </figure>`;
+    })
+    .join("");
+  return `<div class="chat-image-gallery">${figs}</div>`;
+}
+
 function renderChatMessageBubble(m, idx) {
   const isRun = m.kind === "run_result" || m.kind === "handoff_report";
   // Report cards only for persisted messages with html (never stream placeholders).
@@ -4224,6 +5046,7 @@ function renderChatMessageBubble(m, idx) {
   const textForDisplay = hasHtml
     ? stripEmbeddedHtmlDocs(m.content)
     : m.content || "";
+  const imageGallery = renderMessageImageAttachments(m.attachments);
 
   // HTML reports are artifacts, not chat bubbles.
   // While a new reply streams, show a light placeholder so frequent re-renders
@@ -4242,7 +5065,7 @@ function renderChatMessageBubble(m, idx) {
     const preview = state.chatSending
       ? `<div class="chat-html-preview chat-html-placeholder" style="min-height:120px;padding:1rem;color:var(--muted)">Report saved — finishing reply…</div>`
       : `<div class="chat-html-preview">
-          <iframe class="chat-html-frame" data-html-idx="${idx}" title="HTML report preview" sandbox="allow-same-origin" style="height:360px;min-height:360px"></iframe>
+          <iframe class="chat-html-frame" data-html-idx="${idx}" title="HTML report preview" sandbox="allow-same-origin"></iframe>
         </div>`;
     return `
       <article class="chat-report-card" data-msg-idx="${idx}" aria-label="${escapeHtml(title)}">
@@ -4257,6 +5080,7 @@ function renderChatMessageBubble(m, idx) {
           </div>
         </header>
         ${caption}
+        ${imageGallery}
         ${preview}
       </article>`;
   }
@@ -4278,6 +5102,7 @@ function renderChatMessageBubble(m, idx) {
         <span class="muted">${escapeHtml(fmtTime(m.timestamp))}</span>
       </div>
       ${contentBlock}
+      ${imageGallery}
     </div>`;
 }
 
@@ -4286,13 +5111,15 @@ function renderPendingChatBubbles() {
   const parts = [];
   const hasStreamText =
     Boolean((state.chatStreamingText || "").trim()) &&
-    !state.chatStreamGeneratingHtml;
+    !state.chatStreamGeneratingHtml &&
+    !state.chatStreamGeneratingImage;
   const hasTools = (state.chatStreamTools || []).length > 0;
   // Preparing / working until the first non-whitespace token arrives.
   // Do not show an empty "streaming…" bubble during tools-only / HTML phases.
   if (!hasStreamText) {
     let label = "Preparing answer…";
     if (state.chatStreamGeneratingHtml) label = "Generating HTML report…";
+    else if (state.chatStreamGeneratingImage) label = "Generating image…";
     else if (hasTools) label = "Working… using tools";
     parts.push(`
       <div class="chat-bubble role-assistant pending" aria-live="polite" aria-busy="true">
@@ -4335,8 +5162,7 @@ function wireChatHtmlPreviews(thread) {
     const idx = Number(frame.dataset.htmlIdx);
     const msg = state.chatMessages[idx];
     if (!msg?.html) return;
-    frame.style.height = "360px";
-    frame.style.minHeight = "360px";
+    // Height comes from CSS (.chat-html-frame / .chat-html-preview overflow)
     // Prefer dedicated HTML endpoint (most reliable), blob fallback, then srcdoc.
     if (state.chatId != null && Number.isFinite(idx)) {
       frame.src = `/chats/${encodeURIComponent(state.chatId)}/messages/${idx}/html?t=${Date.now()}`;
@@ -4498,6 +5324,17 @@ function wireDialogs() {
   $("#confirm-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const dialog = $("#confirm-dialog");
+    if (dialog?.open) dialog.close("confirm");
+  });
+  ["file-edit-dialog-close", "file-edit-dialog-cancel"].forEach((id) => {
+    $(`#${id}`)?.addEventListener("click", () => {
+      const dialog = $("#file-edit-dialog");
+      if (dialog?.open) dialog.close("cancel");
+    });
+  });
+  $("#file-edit-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const dialog = $("#file-edit-dialog");
     if (dialog?.open) dialog.close("confirm");
   });
 

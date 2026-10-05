@@ -17,6 +17,7 @@ from app.models.source import (
     DataSource,
     DataSourceCreate,
     NosqlSourceConfig,
+    RestSourceConfig,
     SourceConfig,
     SourceType,
     SqlSourceConfig,
@@ -24,6 +25,7 @@ from app.models.source import (
 )
 from app.services.db_tunnel import optional_ssh_tunnel
 from app.services.source_files import source_root
+from app.tools.rest_get import test_rest_connection
 from app.tools.sql_readonly import _DEFAULT_PORTS, _engine_args_for_url, normalize_sqlalchemy_url
 
 logger = logging.getLogger(__name__)
@@ -90,6 +92,9 @@ async def test_source_connection(
         elif incoming.type == SourceType.nosql:
             typed = NosqlSourceConfig.model_validate(incoming.config)
             message = await asyncio.to_thread(_test_nosql, typed, incoming.title)
+        elif incoming.type == SourceType.rest:
+            typed = RestSourceConfig.model_validate(incoming.config)
+            message = await test_rest_connection(typed, incoming.title)
         else:
             return SourceTestResult(ok=False, message=f"Unsupported type: {incoming.type}")
         latency = int((time.perf_counter() - started) * 1000)

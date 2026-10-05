@@ -5,8 +5,17 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from app.models.source import SourceConfig, SourceType, SqlSourceConfig
-from app.services.source_schema import fetch_source_schema
+from app.models.source import (
+    NosqlSourceConfig,
+    RestSourceConfig,
+    SourceConfig,
+    SourceType,
+    SqlSourceConfig,
+)
+from app.services.source_files import library_source_root
+from app.services.source_schema import fetch_mongo_schema, fetch_source_schema
+from app.tools.file_sql import describe_file_tables_for_prompt
+from app.tools.rest_get import normalize_allowed_prefixes
 
 logger = logging.getLogger(__name__)
 
@@ -16,17 +25,17 @@ _SCHEMA_CAP_CHARS = 3500
 async def build_attached_sources_schema_block(
     sources: list[SourceConfig],
     *,
+    workspace_root=None,
     max_chars: int = _SCHEMA_CAP_CHARS,
 ) -> str:
     """
-    Fetch SQL schema summaries (table names + demo_info descriptions when present)
-    and format a prompt section. Never raises — returns "" on failure / no SQL sources.
-    """
-    sql_sources = [s for s in sources if s.type == SourceType.sql]
-    if not sql_sources:
-        return ""
+    Fetch schema summaries for attached sources and format a prompt section.
 
+    Never raises — returns "" on failure / no relevant sources.
+    """
     sections: list[str] = []
+
+    sql_sources = [s for s in sources if s.type == SourceType.sql]
     for source in sql_sources:
         try:
             cfg = SqlSourceConfig.model_validate(source.config)
@@ -65,6 +74,90 @@ async def build_attached_sources_schema_block(
         else:
             lines.append("(no tables found)")
 
+        sections.append("\n".join(lines))
+
+    mongo_sources = [
+        s
+        for s in sources
+        if s.type == SourceType.nosql
+        and (s.config or {}).get("engine", "mongodb") == "mongodb"
+    ]
+    for source in mongo_sources:
+        try:
+            cfg = NosqlSourceConfig.model_validate(source.config)
+            schema = await fetch_mongo_schema(source.id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "Mongo schema context failed for source %s: %s", source.id, exc
+            )
+            sections.append(
+                f"### {source.title} (`{source.id}`, mongodb)\n"
+                f"(collections unavailable: {exc})\n"
+            )
+            continue
+        lines = [
+            f"### {source.title} (`{source.id}`, mongodb)",
+            "Tools: `mongo_list_collections`, `mongo_find`, `mongo_aggregate` (read-only).",
+        ]
+        if source.description:
+            lines.append(source.description.strip()[:400])
+        if schema.tables:
+            lines.append("Collections:")
+            for table in schema.tables[:60]:
+                lines.append(f"- `{table.name}`")
+            if len(schema.tables) > 60:
+                lines.append("…")
+        else:
+            lines.append("(no collections found)")
+        sections.append("\n".join(lines))
+
+    files_sources = [s for s in sources if s.type == SourceType.files]
+    if files_sources and workspace_root is not None:
+        mounts = {}
+        titles = {}
+        for source in files_sources:
+            try:
+                mounts[f"sources/{source.id}"] = library_source_root(
+                    workspace_root, source.id
+                )
+                titles[source.id] = source.title
+            except Exception as exc:  # noqa: BLE001
+                logger.info("File mount for schema failed %s: %s", source.id, exc)
+        if mounts:
+            try:
+                import asyncio
+
+                blurb = await asyncio.to_thread(
+                    describe_file_tables_for_prompt,
+                    mounts,
+                    source_titles=titles,
+                    max_chars=1800,
+                )
+                if blurb:
+                    sections.append(blurb)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("File SQL schema blurb failed: %s", exc)
+
+    for source in sources:
+        if source.type != SourceType.rest:
+            continue
+        try:
+            cfg = RestSourceConfig.model_validate(source.config)
+        except Exception:  # noqa: BLE001
+            continue
+        prefixes = normalize_allowed_prefixes(cfg.allowed_path_prefixes)
+        lines = [
+            f"### {source.title} (`{source.id}`, rest)",
+            f"base_url: {cfg.base_url}",
+            "Tool: `http_get` (GET only).",
+        ]
+        if source.description:
+            lines.append(source.description.strip()[:400])
+        if prefixes:
+            lines.append("Allowed path prefixes: " + ", ".join(prefixes))
+        else:
+            lines.append("Allowed path prefixes: (none configured — GETs rejected)")
+        # Never include bearer_token / header_value.
         sections.append("\n".join(lines))
 
     if not sections:

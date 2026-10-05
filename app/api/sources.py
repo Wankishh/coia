@@ -1,8 +1,9 @@
 """Data Sources library CRUD and file-source content endpoints."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_settings, get_source_repo
@@ -10,6 +11,7 @@ from app.config import Settings
 from app.models.source import (
     DataSourceCreate,
     DataSourceUpdate,
+    NosqlSourceConfig,
     SourcePublic,
     SourceType,
     SqlSourceConfig,
@@ -20,14 +22,23 @@ from app.services.source_files import (
     SourceFilesError,
     delete_file,
     delete_library_source_dir,
+    dir_entry,
+    file_entry,
     list_source_files,
-    normalize_upload_name,
+    mkdir_path,
+    normalize_dir_path,
     read_text_file,
+    resolve_existing_file,
+    resolve_upload_relative_path,
     source_root,
     write_text_file,
     write_upload,
 )
-from app.services.source_schema import SourceSchema, fetch_source_schema
+from app.services.source_schema import (
+    SourceSchema,
+    fetch_mongo_schema,
+    fetch_source_schema,
+)
 from app.services.source_test import SourceTestRequest, SourceTestResult, test_source_connection
 
 router = APIRouter(tags=["sources"])
@@ -37,10 +48,18 @@ class FileContentUpdate(BaseModel):
     content: str = Field(description="Full text file contents")
 
 
+class MkdirBody(BaseModel):
+    path: str = Field(description="Relative directory path to create")
+
+
 class SourceFileInfo(BaseModel):
+    name: str
     path: str
-    size: int
-    is_text: bool
+    type: Literal["file", "dir"]
+    size: Optional[int] = None
+    is_text: Optional[bool] = None
+    mtime: Optional[str] = None
+    created: Optional[str] = None
 
 
 class SourceFileContent(BaseModel):
@@ -119,20 +138,30 @@ async def get_source_schema(
     source_id: str,
     source_repo: SourceRepository = Depends(get_source_repo),
 ) -> SourceSchema:
-    """List tables and columns (plus cheap row counts) for a SQL library source."""
+    """List tables/columns (SQL) or collections (MongoDB) for a library source."""
     source = await source_repo.get(source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found")
-    if source.type != SourceType.sql:
-        raise HTTPException(
-            status_code=400,
-            detail="Schema browser is only available for SQL sources",
-        )
-    try:
-        cfg = SqlSourceConfig.model_validate(source.config)
-        return await fetch_source_schema(source.id, cfg)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(exc) or "Schema fetch failed") from exc
+    if source.type == SourceType.sql:
+        try:
+            cfg = SqlSourceConfig.model_validate(source.config)
+            return await fetch_source_schema(source.id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=400, detail=str(exc) or "Schema fetch failed"
+            ) from exc
+    if source.type == SourceType.nosql:
+        try:
+            cfg = NosqlSourceConfig.model_validate(source.config)
+            return await fetch_mongo_schema(source.id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=400, detail=str(exc) or "Schema fetch failed"
+            ) from exc
+    raise HTTPException(
+        status_code=400,
+        detail="Schema browser is only available for SQL and MongoDB sources",
+    )
 
 
 @router.post("/sources/test", response_model=SourceTestResult)
@@ -177,6 +206,10 @@ async def test_source(
 )
 async def list_source_files_endpoint(
     source_id: str,
+    path: Optional[str] = Query(
+        default=None,
+        description="Relative directory to list (immediate children only)",
+    ),
     source_repo: SourceRepository = Depends(get_source_repo),
     settings: Settings = Depends(get_settings),
 ) -> list[SourceFileInfo]:
@@ -185,7 +218,12 @@ async def list_source_files_endpoint(
         raise HTTPException(status_code=404, detail="Source not found")
     _require_files_source(source)
     root = source_root(settings.workspace_path, source_id)
-    return [SourceFileInfo(**entry) for entry in list_source_files(root)]
+    try:
+        rel = normalize_dir_path(path)
+        entries = list_source_files(root, rel or None)
+    except SourceFilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [SourceFileInfo(**entry) for entry in entries]
 
 
 @router.post(
@@ -198,7 +236,7 @@ async def upload_source_file(
     file: UploadFile = File(...),
     path: Optional[str] = Query(
         default=None,
-        description="Optional relative path override (defaults to upload filename)",
+        description="Relative destination path (or directory ending with /)",
     ),
     source_repo: SourceRepository = Depends(get_source_repo),
     settings: Settings = Depends(get_settings),
@@ -209,18 +247,59 @@ async def upload_source_file(
     _require_files_source(source)
     root = source_root(settings.workspace_path, source_id)
     try:
-        rel = path.strip().lstrip("/") if path else normalize_upload_name(file.filename)
+        rel = resolve_upload_relative_path(path, file.filename)
         if not rel:
             raise SourceFilesError("path is empty")
         data = await file.read()
-        target = write_upload(root, rel, data)
+        write_upload(root, rel, data)
+        return SourceFileInfo(**file_entry(root, rel))
     except SourceFilesError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return SourceFileInfo(
-        path=rel,
-        size=target.stat().st_size,
-        is_text=True,
-    )
+
+
+@router.post(
+    "/sources/{source_id}/files/mkdir",
+    response_model=SourceFileInfo,
+    status_code=201,
+)
+async def mkdir_source_dir(
+    source_id: str,
+    body: MkdirBody,
+    source_repo: SourceRepository = Depends(get_source_repo),
+    settings: Settings = Depends(get_settings),
+) -> SourceFileInfo:
+    source = await source_repo.get(source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+    _require_files_source(source)
+    root = source_root(settings.workspace_path, source_id)
+    try:
+        rel = normalize_dir_path(body.path)
+        if not rel:
+            raise SourceFilesError("path is empty")
+        mkdir_path(root, rel)
+        return SourceFileInfo(**dir_entry(root, rel))
+    except SourceFilesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/sources/{source_id}/files/{file_path:path}/raw")
+async def download_source_file_raw(
+    source_id: str,
+    file_path: str,
+    source_repo: SourceRepository = Depends(get_source_repo),
+    settings: Settings = Depends(get_settings),
+) -> FileResponse:
+    source = await source_repo.get(source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+    _require_files_source(source)
+    root = source_root(settings.workspace_path, source_id)
+    try:
+        target = resolve_existing_file(root, file_path)
+    except SourceFilesError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(target, filename=target.name)
 
 
 @router.get(

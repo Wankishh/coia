@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register the default Financial Analyst demo agent via the harness API."""
+"""Register the default Finance Ops demo agent via the harness API."""
 
 from __future__ import annotations
 
@@ -24,25 +24,34 @@ from app.services.demo_source import (  # noqa: E402
     build_demo_source_payload,
 )
 
-DEFAULT_SYSTEM_PROMPT = """You are {{name}}, a financial analyst agent for Coia Agents.
+DEFAULT_SYSTEM_PROMPT = """# Role
 
-Your job is to analyze sales data from the demo database and produce clear,
-actionable insights for business stakeholders.
+You are {{name}}, an FP&A / business finance analyst for Coia Agents.
 
-Guidelines:
-- Use the run_sql_query tool for read-only analysis of the demo database.
-- Primary fact table: sales_transactions (denormalized). Related tables for joins:
+Analyze attached demo sales/finance SQL and produce clear management insight
+(revenue, mix, variance, and follow-ups) — not markets or trading research.
+
+## Principles
+
+- Use run_sql_query for read-only analysis. Never invent metrics; cite query results.
+- Primary fact table: sales_transactions (denormalized). Related joins:
   customers, products, employees, orders, order_items.
-- Prefer write_html_report when producing a visual summary (tables, key metrics, charts via simple HTML/CSS).
-- You may use read_file / write_file / list_files within your sandbox workspace for notes.
-- Be concise, data-driven, and cite the query results you used.
+- Prefer dimensions that exist: region, product, channel, revenue, margin.
+- Separate facts, assumptions, and recommendations. Call out data gaps.
 - Never attempt write/DDL SQL — only SELECT/WITH/SHOW/EXPLAIN are allowed.
+
+## Output shape
+
+- Executive summary (3–6 bullets), then key tables, then risks / next checks.
+- For analytical digests, call write_html_report with a complete styled HTML
+  document; keep a short Markdown summary in the chat message.
 """
 
 DEFAULT_PROMPT = (
-    "Analyze demo sales data: summarize revenue by region and product from "
-    "sales_transactions, optionally cross-check with orders/order_items/customers, "
-    "highlight top performers, and write an HTML report with key metrics and tables."
+    "From demo sales_transactions, summarize revenue and margin by region and "
+    "product; highlight top performers and notable gaps; cross-check with "
+    "orders/order_items/customers if useful; write an HTML report with key "
+    "metrics and tables, plus 3 finance follow-ups."
 )
 
 PROVIDER_ENV_KEYS = {
@@ -79,8 +88,8 @@ def build_source_payload() -> dict[str, Any]:
 
 def build_agent_payload(api_key: str, source_ids: list[str]) -> dict[str, Any]:
     return {
-        "name": os.getenv("SEED_AGENT_NAME", "Financial Analyst"),
-        "role": os.getenv("SEED_AGENT_ROLE", "financial_analyst"),
+        "name": os.getenv("SEED_AGENT_NAME", "Finance Ops"),
+        "role": os.getenv("SEED_AGENT_ROLE", "finance_ops"),
         "system_prompt": os.getenv("SEED_AGENT_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
         "provider": os.getenv("SEED_AGENT_PROVIDER", "openai"),
         "model_name": os.getenv("SEED_AGENT_MODEL", "gpt-4o-mini"),
@@ -161,7 +170,7 @@ def main() -> int:
             print(f"Seeding demo agent at {base}/agents ...")
             print(json.dumps(safe_preview, indent=2))
 
-            # Avoid duplicate Financial Analyst if already present
+            # Avoid duplicate Finance Ops agent if already present
             existing = client.get(f"{base}/agents")
             existing.raise_for_status()
             agents = existing.json()

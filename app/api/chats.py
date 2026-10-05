@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.api.deps import get_agent_repo, get_chat_service, get_settings
@@ -23,7 +23,9 @@ from app.models.conversation import (
 )
 from app.services.chat_attachments import (
     ChatAttachmentError,
+    guess_content_type,
     mirror_into_agent_workspace,
+    resolve_chat_attachment_file,
     save_upload,
 )
 from app.services.chat_service import ChatService, ChatServiceError
@@ -171,6 +173,46 @@ async def upload_chat_attachment(
     if updated is None:
         raise HTTPException(status_code=404, detail="Chat not found")
     return attachment
+
+
+@router.get("/chats/{chat_id}/attachments/{filename}")
+async def get_chat_attachment(
+    chat_id: str,
+    filename: str,
+    chat_service: ChatService = Depends(get_chat_service),
+    settings: Settings = Depends(get_settings),
+) -> FileResponse:
+    """Serve a chat attachment file for preview (images, uploads)."""
+    conversation = await chat_service.get_chat(chat_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    try:
+        path = resolve_chat_attachment_file(
+            settings.workspace_path, chat_id, filename
+        )
+    except ChatAttachmentError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+    known_ct = None
+    for att in conversation.attachments:
+        if att.name == path.name or att.path == path.name:
+            known_ct = att.content_type
+            break
+    if known_ct is None:
+        for msg in conversation.messages:
+            for att in msg.attachments or []:
+                if att.name == path.name or att.path == path.name:
+                    known_ct = att.content_type
+                    break
+    media_type = guess_content_type(path, known_ct)
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=path.name,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.post("/chats/{chat_id}/read", response_model=MarkReadResponse)
